@@ -5,7 +5,7 @@ configuracion al DGX antes de arrancar:
 
   - Rutas: CCDiff trae fijadas "/mnt/disks/sdb/nuscenes" y "~/.unified_data_cache"
     en varias configs (entrenamiento y rollouts). Aqui se sustituyen TODAS por
-    --nuscenes y --cache (por defecto, las carpetas montadas por los sbatch).
+    --nuscenes y --cache (por defecto, las del proyecto montado como /workspace).
   - Registro: por defecto TensorBoard. Con --wandb y la variable WANDB_APIKEY, W&B.
   - Workers de datos segun SLURM_CPUS_PER_TASK, y numero de GPUs.
   - Nombre unico por trabajo (train.py pregunta por teclado si la carpeta de
@@ -14,9 +14,9 @@ configuracion al DGX antes de arrancar:
     limite de tiempo de Slurm (train.py no lo permite por si solo).
 
 Uso dentro del contenedor (lo llaman entrenar_debug.sh y entrenar.sh):
-  python /workspace/lanzar_entrenamiento.py --debug
-  python /workspace/lanzar_entrenamiento.py --gpus 1
-  python /workspace/lanzar_entrenamiento.py --reanudar /workspace/resultados/<nombre>/.../last.ckpt
+  python /workspace/scripts/lanzar_entrenamiento.py --debug
+  python /workspace/scripts/lanzar_entrenamiento.py --gpus 1
+  python /workspace/scripts/lanzar_entrenamiento.py --reanudar /workspace/entrenados/<nombre>/.../last.ckpt
 """
 import argparse
 import os
@@ -49,10 +49,13 @@ def main():
     ap.add_argument("--debug", action="store_true",
                     help="modo debug de CCDiff: validacion/guardado/rollout cada pocos pasos, sin logger")
     ap.add_argument("--nombre", default=None, help="nombre del experimento (por defecto ccdiff_<job>)")
-    ap.add_argument("--nuscenes", default="/datos/nuscenes", help="carpeta raiz de nuScenes")
-    ap.add_argument("--cache", default="/workspace/cache/unified_data_cache",
+    # Rutas dentro del contenedor = estructura del proyecto (montado como /workspace):
+    #   datasets/nuscenes  datasets/trajdata_cache  entrenados/  pruebas/  entornos/home
+    ap.add_argument("--nuscenes", default="/workspace/datasets/nuscenes", help="carpeta raiz de nuScenes")
+    ap.add_argument("--cache", default="/workspace/datasets/trajdata_cache",
                     help="cache de trajdata (se crea la 1a vez: tarda y conviene conservarla)")
-    ap.add_argument("--salida", default="/workspace/resultados")
+    ap.add_argument("--salida", default=None,
+                    help="por defecto /workspace/entrenados (o /workspace/pruebas con --debug)")
     ap.add_argument("--gpus", type=int, default=1)
     ap.add_argument("--pasos", type=int, default=None, help="sustituye los 100k pasos por defecto")
     ap.add_argument("--batch", type=int, default=None, help="batch de entrenamiento (CCDiff: 4)")
@@ -67,6 +70,8 @@ def main():
     job = os.environ.get("SLURM_JOB_ID") or time.strftime("%Y%m%d_%H%M%S")
     nombre = args.nombre or f"ccdiff_{'debug_' if args.debug else ''}{job}"
     nusc, cache = Path(args.nuscenes), Path(args.cache)
+    if args.salida is None:
+        args.salida = "/workspace/pruebas" if args.debug else "/workspace/entrenados"
     if not (nusc / "v1.0-trainval").is_dir():
         msg = f"No encuentro {nusc}/v1.0-trainval: revisa el montaje de nuScenes (--nuscenes)."
         if not args.comprobar:
@@ -74,7 +79,7 @@ def main():
         print("AVISO:", msg)
     cache.mkdir(parents=True, exist_ok=True)
     # HOME escribible y persistente para cachés de wandb, matplotlib, torch...
-    os.environ["HOME"] = os.environ.get("CCDIFF_HOME", "/workspace/home")
+    os.environ["HOME"] = os.environ.get("CCDIFF_HOME", "/workspace/entornos/home")
     Path(os.environ["HOME"]).mkdir(parents=True, exist_ok=True)
 
     # --- Configuracion registrada: se modifica ANTES de que train.py la clone ---

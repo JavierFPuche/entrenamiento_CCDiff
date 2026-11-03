@@ -5,13 +5,15 @@ IMAGE_NAME := ccdiff_train
 UID := $(shell id -u)
 GID := $(shell id -g)
 
-# Carpetas locales que se montan (ajusta NUSC a donde tengas nuScenes en el PC)
-NUSC := /mnt/secundario/datasets/nuscenes
+# Misma estructura que en el DGX, para probar en tu PC (RTX 4090):
+#   PROYECTO/                      -> /workspace
+#     datasets/nuscenes/           (pon aqui nuScenes si quieres entrenar en local)
+#     datasets/trajdata_cache/  entrenados/  pruebas/  entornos/home/
+#   esta carpeta (el repositorio)  -> /workspace/scripts
+PROYECTO := $(abspath $(CURDIR)/../VLM_ACCIDENTES_CCDIFF)
 
-# Mismos montajes que en el DGX:
-#   esta carpeta -> /workspace (lanzador, cache de trajdata y resultados)
-#   nuScenes     -> /datos/nuscenes (lanzar_entrenamiento.py cambia ahi las rutas fijas de CCDiff)
 define run_docker
+	mkdir -p $(PROYECTO)/datasets/trajdata_cache $(PROYECTO)/entrenados $(PROYECTO)/pruebas $(PROYECTO)/entornos/home
 	docker run -it --rm \
 		--net host \
 		--gpus all \
@@ -20,9 +22,8 @@ define run_docker
 		--ulimit stack=67108864 \
 		--name=$(IMAGE_NAME)_container \
 		-u $(USER_NAME) \
-		-v $(CURDIR):/workspace \
-		-v $(NUSC):/datos/nuscenes:ro \
-		-e HOME=/workspace/home \
+		-v $(PROYECTO):/workspace \
+		-v $(CURDIR):/workspace/scripts \
 		'$(IMAGE_NAME)':$(TAG_NAME) \
 		/bin/bash -c $(1)
 endef
@@ -36,6 +37,6 @@ attach:
 run:
 	$(call run_docker, "bash")
 
-# Prueba rapida en tu PC (RTX 4090) antes de mandar trabajos al DGX
+# Prueba rapida en tu PC antes de mandar trabajos al DGX
 debug:
-	$(call run_docker, "python /workspace/lanzar_entrenamiento.py --debug --pasos 200")
+	$(call run_docker, "python /workspace/scripts/lanzar_entrenamiento.py --debug --pasos 200")

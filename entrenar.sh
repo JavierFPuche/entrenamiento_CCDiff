@@ -7,11 +7,11 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --output=logs/%x_%j.out
 
-# Entrenamiento completo de CCDiff (100k pasos, configuracion del paper).
-# En el DGX:
-#   sbatch entrenar.sh                                   # empezar
-#   sbatch entrenar.sh --reanudar /datos/ccdiff/resultados/<nombre>/<version>/checkpoints/<archivo>.ckpt
-#     (en el DGX esa carpeta es /raid/$USER/ccdiff_datos/resultados/...)  # continuar si se corta a las 24 h
+# Entrenamiento completo de CCDiff (100k pasos, configuracion del paper) -> entrenados/
+# En el DGX, desde VLM_ACCIDENTES_CCDIFF/scripts:
+#   sbatch entrenar.sh                       # empezar
+#   sbatch entrenar.sh --reanudar /workspace/entrenados/<nombre>/<version>/checkpoints/<archivo>.ckpt
+#                                            # continuar si se corta a las 24 h
 # Cualquier argumento extra se pasa a lanzar_entrenamiento.py (--pasos, --batch, --wandb...).
 # Para usar W&B:  export WANDB_APIKEY=...  antes de sbatch, y anade --wandb.
 
@@ -20,36 +20,30 @@ export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
 IMAGE_NAME="ccdiff_train"
-# Carpeta del proyecto: aquella desde la que lanzas sbatch (o la que indiques con
-# CCDIFF_DIR=...). Se monta como /workspace dentro del contenedor.
-PATH_TO_SOURCE_CODE=${CCDIFF_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}
-if [ ! -f "${PATH_TO_SOURCE_CODE}/lanzar_entrenamiento.py" ]; then
-  echo "ERROR: ${PATH_TO_SOURCE_CODE} no es la carpeta del proyecto (falta lanzar_entrenamiento.py)."
-  echo "Lanza sbatch desde la carpeta del proyecto, o exporta CCDIFF_DIR=/ruta/a/la/carpeta."
-  exit 1
-fi
-# nuScenes: NUSCENES=... si lo indicas; si no, <proyecto>/datasets/nuscenes; si no, /raid/$USER/datasets/nuscenes
-if [ -z "${NUSCENES:-}" ]; then
-  if [ -d "${PATH_TO_SOURCE_CODE}/datasets/nuscenes" ]; then
-    NUSCENES=${PATH_TO_SOURCE_CODE}/datasets/nuscenes
-  else
-    NUSCENES=/raid/${USER}/datasets/nuscenes
-  fi
-fi
-if [ ! -d "${NUSCENES}/v1.0-trainval" ]; then
-  echo "ERROR: no encuentro ${NUSCENES}/v1.0-trainval (descomprime v1.0-trainval_meta.tgz ahi, o exporta NUSCENES=/ruta)."
-  exit 1
-fi
-echo "nuScenes: ${NUSCENES}"
-# Lo pesado (cache de trajdata ~ decenas de GB, checkpoints) va a /raid, no al home
-DATOS=/raid/${USER}/ccdiff_datos
-mkdir -p "${DATOS}/cache" "${DATOS}/resultados"
+REPO_DIR="VLM_ACCIDENTES_CCDIFF"
+# Proyecto (misma estructura que tus otros proyectos de Workspace):
+#   scripts/   -> este repositorio (git clone)     datasets/nuscenes/      -> nuScenes
+#   entrenados/ -> checkpoints del entrenamiento   datasets/trajdata_cache/ -> cache de trajdata
+#   pruebas/   -> ejecuciones de debug             entornos/home/          -> HOME del contenedor
+# Se monta entero como /workspace. CCDIFF_DIR=... permite usar otra carpeta.
+PATH_TO_SOURCE_CODE=${CCDIFF_DIR:-/raid/${USER}/Workspace/${REPO_DIR}}
 OUTPUT_SQSH=/raid/${USER}/enroot/sqsh/${IMAGE_NAME}_v1.sqsh
-MOUNTS="${PATH_TO_SOURCE_CODE}:/workspace,${NUSCENES}:/datos/nuscenes:ro,${DATOS}:/datos/ccdiff"
+
+if [ ! -f "${PATH_TO_SOURCE_CODE}/scripts/lanzar_entrenamiento.py" ]; then
+  echo "ERROR: no encuentro ${PATH_TO_SOURCE_CODE}/scripts/lanzar_entrenamiento.py"
+  echo "Clona el repositorio en ${PATH_TO_SOURCE_CODE}/scripts (o exporta CCDIFF_DIR=/ruta/al/proyecto)."
+  exit 1
+fi
+mkdir -p "${PATH_TO_SOURCE_CODE}"/{entrenados,pruebas,datasets/trajdata_cache,entornos/home}
+MOUNTS="${PATH_TO_SOURCE_CODE}:/workspace"
+if [ ! -d "${PATH_TO_SOURCE_CODE}/datasets/nuscenes/v1.0-trainval" ]; then
+  echo "ERROR: no encuentro ${PATH_TO_SOURCE_CODE}/datasets/nuscenes/v1.0-trainval"
+  echo "Descomprime alli v1.0-trainval_meta.tgz y el map expansion (ver README)."
+  exit 1
+fi
 
 srun \
   --container-image="$OUTPUT_SQSH" \
   --container-mounts="$MOUNTS" \
   --container-workdir=/workspace \
-  python /workspace/lanzar_entrenamiento.py --gpus 1 \
-    --cache /datos/ccdiff/cache --salida /datos/ccdiff/resultados "$@"
+  python /workspace/scripts/lanzar_entrenamiento.py --gpus 1 "$@"
