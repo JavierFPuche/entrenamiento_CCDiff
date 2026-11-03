@@ -12,6 +12,8 @@ configuracion al DGX antes de arrancar:
     salida ya existe, y dentro de sbatch eso rompe el trabajo).
   - --reanudar <checkpoint.ckpt>: continua un entrenamiento cortado por el
     limite de tiempo de Slurm (train.py no lo permite por si solo).
+  - Enlace ~/.unified_data_cache -> cache: tbsim abre los mapas vectoriales con
+    esa ruta fija (load_vec_map, scene_editor) en vez de la de la configuracion.
   - Parche de torchvision: con torch 2.0, copiar (deepcopy) un modelo hecho con
     create_feature_extractor pierde train_graph/eval_graph, y la copia EMA de
     CCDiff (algos.py: ema_policy = deepcopy(policy)) falla en model.eval() con
@@ -26,6 +28,7 @@ import argparse
 import copy
 import os
 import runpy
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -51,6 +54,28 @@ def parchear_deepcopy_feature_extractor():
         return res
 
     fe.DualGraphModule.__deepcopy__ = __deepcopy__
+
+
+def enlazar_cache_home(cache: Path):
+    """tbsim abre los mapas con la cache por defecto, ignorando la configuracion:
+    load_vec_map(..., cache_path="~/.unified_data_cache") en trajdata_utils.py
+    (validacion/guia de entrenamiento), y lo mismo en scene_editor.py y
+    scene_edit_utils.py. Se enlaza ~/.unified_data_cache -> la cache real (enlace
+    relativo: vale dentro del contenedor y desde el nodo de acceso)."""
+    enlace = Path(os.environ["HOME"]) / ".unified_data_cache"
+    destino = os.path.relpath(cache, enlace.parent)
+    if enlace.is_symlink():
+        if os.readlink(enlace) == destino:
+            return
+        enlace.unlink()
+    elif enlace.exists():
+        # Una carpeta sin ningun archivo (p. ej. subcarpetas vacias de un intento
+        # anterior) se sustituye; si tiene archivos, no se toca.
+        if any(p.is_file() for p in enlace.rglob("*")):
+            print(f"AVISO: {enlace} es una carpeta con datos; no se reemplaza por el enlace a {cache}")
+            return
+        shutil.rmtree(enlace)
+    enlace.symlink_to(destino, target_is_directory=True)
 
 
 def parchear(cfg, nusc, cache, cambios, ruta="cfg"):
@@ -105,6 +130,8 @@ def main():
     # HOME escribible y persistente para cachés de wandb, matplotlib, torch...
     os.environ["HOME"] = os.environ.get("CCDIFF_HOME", "/workspace/entornos/home")
     Path(os.environ["HOME"]).mkdir(parents=True, exist_ok=True)
+    enlazar_cache_home(cache)
+    print(f"[lanzador] ~/.unified_data_cache -> {cache} (rutas fijas de tbsim)")
 
     # --- Configuracion registrada: se modifica ANTES de que train.py la clone ---
     sys.path.insert(0, str(CCDIFF))
