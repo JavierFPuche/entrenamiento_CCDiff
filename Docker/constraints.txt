@@ -1,0 +1,11 @@
+# Versiones fijas que ninguna dependencia puede cambiar (pip install -c constraints.txt).
+# torch 2.0.1 en vez del 1.13.1 de CCDiff: 1.13.1 solo existe para CUDA 11.6/11.7 y no
+# trae kernels para sm_90 (H100/H200): falla con "no kernel image is available".
+# 2.0.1 es la version mas cercana con CUDA 11.8 (soporta sm_90) y sigue admitiendo Python 3.8.
+torch==2.0.1
+torchvision==0.15.2
+torchtext==0.15.2
+# Fijadas por tbsim
+numpy==1.23.4
+protobuf==3.20.1
+pytorch-lightning==1.8.3.post0
