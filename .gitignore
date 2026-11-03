@@ -1,0 +1,10 @@
+# Datos y salidas: viven solo en el DGX, nunca en git
+datasets/
+logs/
+home/
+cache/
+resultados/
+*.ckpt
+*.tgz
+*.zip
+__pycache__/

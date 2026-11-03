@@ -28,7 +28,19 @@ if [ ! -f "${PATH_TO_SOURCE_CODE}/lanzar_entrenamiento.py" ]; then
   echo "Lanza sbatch desde la carpeta del proyecto, o exporta CCDIFF_DIR=/ruta/a/la/carpeta."
   exit 1
 fi
-NUSCENES=/raid/${USER}/datasets/nuscenes
+# nuScenes: NUSCENES=... si lo indicas; si no, <proyecto>/datasets/nuscenes; si no, /raid/$USER/datasets/nuscenes
+if [ -z "${NUSCENES:-}" ]; then
+  if [ -d "${PATH_TO_SOURCE_CODE}/datasets/nuscenes" ]; then
+    NUSCENES=${PATH_TO_SOURCE_CODE}/datasets/nuscenes
+  else
+    NUSCENES=/raid/${USER}/datasets/nuscenes
+  fi
+fi
+if [ ! -d "${NUSCENES}/v1.0-trainval" ]; then
+  echo "ERROR: no encuentro ${NUSCENES}/v1.0-trainval (descomprime v1.0-trainval_meta.tgz ahi, o exporta NUSCENES=/ruta)."
+  exit 1
+fi
+echo "nuScenes: ${NUSCENES}"
 # Lo pesado (cache de trajdata ~ decenas de GB, checkpoints) va a /raid, no al home
 DATOS=/raid/${USER}/ccdiff_datos
 mkdir -p "${DATOS}/cache" "${DATOS}/resultados"
