@@ -14,6 +14,8 @@ configuracion al DGX antes de arrancar:
     limite de tiempo de Slurm (train.py no lo permite por si solo).
   - Enlace ~/.unified_data_cache -> cache: tbsim abre los mapas vectoriales con
     esa ruta fija (load_vec_map, scene_editor) en vez de la de la configuracion.
+  - os.cpu_count() = nucleos del trabajo (tbsim lo usa para lanzar procesos de
+    trajdata) y SLURM_JOB_NAME=bash para que Lightning no ignore SIGTERM.
   - Parche de torchvision: con torch 2.0, copiar (deepcopy) un modelo hecho con
     create_feature_extractor pierde train_graph/eval_graph, y la copia EMA de
     CCDiff (algos.py: ema_policy = deepcopy(policy)) falla en model.eval() con
@@ -54,6 +56,31 @@ def parchear_deepcopy_feature_extractor():
         return res
 
     fe.DualGraphModule.__deepcopy__ = __deepcopy__
+
+
+def ajustar_slurm_y_cpus():
+    """Dos problemas de correr CCDiff dentro de un trabajo de Slurm:
+
+    1) tbsim crea los procesos de trajdata con num_workers=os.cpu_count(), que
+       devuelve TODOS los nucleos del nodo (224 en las H200), no los del trabajo
+       (16). Se hace que os.cpu_count() devuelva los nucleos asignados.
+    2) PyTorch Lightning 1.8, al detectar Slurm, instala un manejador que ignora
+       SIGTERM para auto-reencolar el trabajo. Los procesos de trajdata lo heredan,
+       ignoran el SIGTERM con el que trajdata los cierra ("bypassing sigterm" x N)
+       y el trabajo se queda colgado. SLURM_JOB_NAME=bash es la forma documentada
+       por Lightning de desactivarlo; para continuar un entrenamiento cortado ya
+       esta --reanudar.
+    """
+    try:
+        asignados = len(os.sched_getaffinity(0))
+    except AttributeError:
+        asignados = os.cpu_count() or 1
+    pedidos = int(os.environ.get("SLURM_CPUS_PER_TASK", asignados))
+    n = max(1, min(asignados, pedidos))
+    total = os.cpu_count()
+    os.cpu_count = lambda: n
+    os.environ["SLURM_JOB_NAME"] = "bash"
+    return n, total
 
 
 def enlazar_cache_home(cache: Path):
@@ -116,6 +143,10 @@ def main():
                     help="muestra la configuracion final y sale sin entrenar")
     args = ap.parse_args()
 
+    n_cpus, cpus_nodo = ajustar_slurm_y_cpus()
+    print(f"[lanzador] CPUs del trabajo: {n_cpus} (el nodo tiene {cpus_nodo}); "
+          "Lightning sin manejador de Slurm (SLURM_JOB_NAME=bash)")
+
     job = os.environ.get("SLURM_JOB_ID") or time.strftime("%Y%m%d_%H%M%S")
     nombre = args.nombre or f"ccdiff_{'debug_' if args.debug else ''}{job}"
     nusc, cache = Path(args.nuscenes), Path(args.cache)
@@ -139,7 +170,7 @@ def main():
 
     cfg = EXP_CONFIG_REGISTRY[CONFIG]
     cambios = []
-    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 8))
+    cpus = n_cpus
     workers = args.workers if args.workers is not None else max(2, min(16, cpus - 2))
     usar_wandb = args.wandb and "WANDB_APIKEY" in os.environ
     if args.wandb and not usar_wandb:
