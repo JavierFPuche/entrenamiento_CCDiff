@@ -5,7 +5,10 @@
 #SBATCH --time=06:00:00
 #SBATCH --mem=256G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/%x_%j.out
+#SBATCH --output=/raid/%u/Workspace/VLM_ACCIDENTES_CCDIFF/scripts/logs/%x_%j.out
+#SBATCH --chdir=/tmp
+# Rutas ABSOLUTAS vistas desde el nodo de calculo (/raid, sin /nfs): asi da igual
+# desde donde lances sbatch en el nodo de acceso. Slurm cambia %u por tu usuario.
 
 # PRIMER trabajo a lanzar, equivale a la linea "debug" de scripts/run_train.sh de CCDiff.
 #   - Construye la cache de trajdata en datasets/trajdata_cache (solo la 1a vez;

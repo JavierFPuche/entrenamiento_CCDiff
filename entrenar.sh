@@ -5,7 +5,10 @@
 #SBATCH --time=23:59:59
 #SBATCH --mem=256G
 #SBATCH --cpus-per-task=16
-#SBATCH --output=logs/%x_%j.out
+#SBATCH --output=/raid/%u/Workspace/VLM_ACCIDENTES_CCDIFF/scripts/logs/%x_%j.out
+#SBATCH --chdir=/tmp
+# Rutas ABSOLUTAS vistas desde el nodo de calculo (/raid, sin /nfs): asi da igual
+# desde donde lances sbatch en el nodo de acceso. Slurm cambia %u por tu usuario.
 
 # Entrenamiento completo de CCDiff (100k pasos, configuracion del paper) -> entrenados/
 # En el DGX, desde VLM_ACCIDENTES_CCDIFF/scripts:

@@ -5,7 +5,10 @@
 #SBATCH --time=01:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --output=logs/%x_%j.out
+#SBATCH --output=/raid/%u/Workspace/VLM_ACCIDENTES_CCDIFF/scripts/logs/%x_%j.out
+#SBATCH --chdir=/tmp
+# Rutas ABSOLUTAS vistas desde el nodo de calculo (/raid, sin /nfs): asi da igual
+# desde donde lances sbatch en el nodo de acceso. Slurm cambia %u por tu usuario.
 
 # En el DGX, desde VLM_ACCIDENTES_CCDIFF/scripts:  mkdir -p logs && sbatch pull_and_install.sh
 # Descarga la imagen con enroot y comprueba que PyTorch ve la H200 (sm_90).

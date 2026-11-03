@@ -12,6 +12,10 @@ configuracion al DGX antes de arrancar:
     salida ya existe, y dentro de sbatch eso rompe el trabajo).
   - --reanudar <checkpoint.ckpt>: continua un entrenamiento cortado por el
     limite de tiempo de Slurm (train.py no lo permite por si solo).
+  - Parche de torchvision: con torch 2.0, copiar (deepcopy) un modelo hecho con
+    create_feature_extractor pierde train_graph/eval_graph, y la copia EMA de
+    CCDiff (algos.py: ema_policy = deepcopy(policy)) falla en model.eval() con
+    "'GraphModule' object has no attribute 'eval_graph'".
 
 Uso dentro del contenedor (lo llaman entrenar_debug.sh y entrenar.sh):
   python /workspace/scripts/lanzar_entrenamiento.py --debug
@@ -19,6 +23,7 @@ Uso dentro del contenedor (lo llaman entrenar_debug.sh y entrenar.sh):
   python /workspace/scripts/lanzar_entrenamiento.py --reanudar /workspace/entrenados/<nombre>/.../last.ckpt
 """
 import argparse
+import copy
 import os
 import runpy
 import sys
@@ -27,6 +32,25 @@ from pathlib import Path
 
 CCDIFF = Path(os.environ.get("CCDIFF_SRC", "/opt/ccdiff/CCDiff"))
 CONFIG = "trajdata_nusc_ccdiff"
+
+
+def parchear_deepcopy_feature_extractor():
+    """torch>=2.0: GraphModule.__deepcopy__ no copia train_graph/eval_graph del
+    DualGraphModule de torchvision (el codificador de mapas ResNet-18 de CCDiff),
+    y eval()/train() falla sobre la copia EMA. Se copian a mano tras el deepcopy."""
+    import torch.fx
+    from torchvision.models import feature_extraction as fe
+
+    original = torch.fx.GraphModule.__deepcopy__
+
+    def __deepcopy__(self, memo):
+        res = original(self, memo)
+        for attr in ("train_graph", "eval_graph"):
+            if attr in self.__dict__:
+                res.__dict__[attr] = copy.deepcopy(self.__dict__[attr], memo)
+        return res
+
+    fe.DualGraphModule.__deepcopy__ = __deepcopy__
 
 
 def parchear(cfg, nusc, cache, cambios, ruta="cfg"):
@@ -119,6 +143,9 @@ def main():
         print("[lanzador] eval.trajdata.trajdata_cache_location =",
               final.eval.trajdata.trajdata_cache_location)
         return
+
+    parchear_deepcopy_feature_extractor()
+    print("[lanzador] parche torchvision: deepcopy de create_feature_extractor conserva train/eval_graph")
 
     # --- Reanudar: Trainer.fit con ckpt_path --------------------------------
     if args.reanudar:
