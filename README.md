@@ -108,6 +108,11 @@ python3 resumir_evaluacion.py ../evaluaciones/ccdiff_5413 --filtro coll offroad
 ```
 Cada escena tarda unos 80-100 s (20 replanificaciones × ~4 s). El resumen de todas las combinaciones sale al final del log.
 
+**Fallo de CCDiff corregido en `lanzar_evaluacion.py`.** Con `--part_control`, `PartialPerturbationGuidance.perturb` crea el optimizador sobre `x[:, idx, :ts]`. Con `idx` como lista, eso es una copia, así que el guiado nunca modifica la trayectoria. La primera evaluación (job 5435) dio resultados idénticos con `w_collision` −50 y 0 por este motivo.
+- `lanzar_evaluacion.py` optimiza el tensor completo y anula el gradiente fuera de los agentes y pasos controlados.
+- Al final del log aparece `pasos de guiado: N, con cambio en la trayectoria: M`, y M debe ser mayor que 0.
+- `--sin_parche_guiado` reproduce el comportamiento original.
+
 ### Resultado del primer entrenamiento (`ccdiff_5413`, 04/11/2026)
 - 100 000 pasos en unas 9,5 h (2,6 pasos/s en la H200, batch 4), 5 épocas de 20 312 pasos.
 - La pérdida de entrenamiento se estabiliza hacia los 10 000-20 000 pasos (unos 0,23, suavizada, al final).

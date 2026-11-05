@@ -7,6 +7,9 @@ cinematico de tbsim (como en los rollouts del entrenamiento), no con BeamNG.
   --w_collision -50  guiado HACIA la colision (generar accidentes, como en el paper)
   --w_collision 0    sin guiado de colision: trafico "normal" de referencia
 
+Corrige ademas un fallo de CCDiff: con --part_control el guiado (w_collision,
+w_offroad) no modificaba la trayectoria (ver parchear_guiado_parcial).
+
 Reutiliza los arreglos de lanzar_entrenamiento.py: rutas de nuScenes/cache,
 ~/.unified_data_cache, os.cpu_count(), Lightning sin manejador de Slurm y el
 parche de deepcopy de torchvision (al cargar el checkpoint se crea la copia EMA).
@@ -30,6 +33,84 @@ import lanzar_entrenamiento as le  # noqa: E402  (mismos arreglos que el entrena
 
 REGISTRO = "trajdata_nusc_ccdiff"
 
+# Veces que el guiado ha movido de verdad la trayectoria (para comprobarlo en el log)
+CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0}
+
+
+def parchear_guiado_parcial():
+    """Arregla PartialPerturbationGuidance.perturb de CCDiff (--part_control).
+
+    El original crea el optimizador sobre x[:, idx, :ts] con idx una LISTA:
+    eso es indexacion avanzada, que devuelve una COPIA. Dentro de p_sample_loop
+    (torch.no_grad) esa copia es una hoja sin gradiente, Adam la acepta, nunca
+    recibe .grad y opt.step() no hace nada: el guiado no cambia la trayectoria
+    y w_collision no tiene ningun efecto.
+
+    Aqui se optimiza el tensor completo y se anula el gradiente fuera de los
+    agentes controlados y de los primeros `controllable_ts` pasos, que es lo que
+    pretendia el codigo original.
+    """
+    import torch
+    from ccdiff.utils import guidance_loss as gl
+
+    def perturb(self, x_initial, data_batch, opt_params, num_samp=1, decoder=None, return_grad_of=None):
+        assert self.current_guidance is not None, "Must instantiate guidance object before calling"
+        perturb_th = opt_params["perturb_th"]
+        x_guidance = x_initial
+        if not x_guidance.requires_grad:
+            x_guidance.requires_grad_()
+        hoja = x_guidance  # tensor hoja que optimiza Adam (en 2D x_guidance pasa a ser una vista)
+        if len(x_guidance.shape) == 2:
+            NM, _ = x_guidance.shape
+            x_guidance_reshaped = x_guidance.clone()
+            x_guidance = x_guidance.reshape(int(NM // num_samp), num_samp, -1)
+        elif len(x_guidance.shape) == 4:
+            with torch.enable_grad():
+                BN, M, T, _ = x_guidance.shape
+                B = int(BN // num_samp)
+                x_guidance_reshaped = x_guidance.reshape(B, num_samp, M, T, -1).permute(0, 2, 1, 3, 4).reshape(B * M * num_samp, T, -1)
+        else:
+            x_guidance_reshaped = x_guidance
+
+        mascara = None
+        if self.available_idx is not None and hoja.dim() in (3, 4):
+            idx = list(self.available_idx[: x_guidance.shape[-3]])
+            ts = getattr(self, "controllable_ts", None)
+            mascara = torch.zeros_like(hoja, dtype=torch.bool)
+            if hoja.dim() == 3:
+                mascara[idx, :ts] = True
+            else:
+                mascara[:, idx, :ts] = True
+        clase = torch.optim.Adam if opt_params["optimizer"] == "adam" else torch.optim.SGD
+        opt = clase([hoja], lr=opt_params["lr"])
+
+        per_losses = dict()
+        for _ in range(opt_params["grad_steps"]):
+            with torch.enable_grad():
+                x_dec = decoder(x_guidance_reshaped) if decoder is not None else x_guidance_reshaped
+                bsize = int(x_dec.size(0) / num_samp)
+                x_all = self.transform(x_dec, data_batch, self.transform_params, bsize=bsize, num_samp=num_samp)
+                tot_loss, per_losses = self.current_guidance.compute_guidance_loss(
+                    x_all.reshape((bsize, num_samp, -1, 6)), data_batch)
+            antes = hoja.detach().clone()
+            tot_loss.backward()
+            if mascara is not None and hoja.grad is not None:
+                hoja.grad.mul_(mascara)
+            opt.step()
+            opt.zero_grad()
+            if perturb_th is not None:
+                with torch.no_grad():
+                    delta = torch.clip(hoja - x_initial, -1 * perturb_th, perturb_th)
+                    hoja.data = x_initial + delta
+            CONTADOR_GUIADO["llamadas"] += 1
+            if not torch.equal(antes, hoja.detach()):
+                CONTADOR_GUIADO["con_cambio"] += 1
+                if CONTADOR_GUIADO["con_cambio"] == 1:
+                    print("[evaluacion] guiado activo: la trayectoria se modifica (primer paso con cambio)")
+        return x_guidance, per_losses
+
+    gl.PartialPerturbationGuidance.perturb = perturb
+
 
 def main():
     ap = argparse.ArgumentParser(description="Evaluacion de CCDiff con scene_editor (sin BeamNG)")
@@ -50,6 +131,8 @@ def main():
     ap.add_argument("--cache", default="/workspace/datasets/trajdata_cache")
     ap.add_argument("--salida", default=None)
     ap.add_argument("--comprobar", action="store_true", help="muestra la configuracion y sale")
+    ap.add_argument("--sin_parche_guiado", action="store_true",
+                    help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
 
     n_cpus, cpus_nodo = le.ajustar_slurm_y_cpus()
@@ -104,6 +187,9 @@ def main():
         sys.exit(f"No hay ningun checkpoint que contenga '{args.ckpt}' en {args.ckpt_dir}")
 
     le.parchear_deepcopy_feature_extractor()
+    if not args.sin_parche_guiado:
+        parchear_guiado_parcial()
+        print("[evaluacion] parche de guiado parcial aplicado")
 
     argv = ["scene_editor.py",
             "--results_root_dir", str(salida), "--num_scenes_per_batch", "1",
@@ -118,7 +204,12 @@ def main():
         argv.append("--render")
     os.chdir(le.CCDIFF)
     sys.argv = argv
-    runpy.run_path(str(le.CCDIFF / "ccdiff" / "examples" / "scene_editor.py"), run_name="__main__")
+    try:
+        runpy.run_path(str(le.CCDIFF / "ccdiff" / "examples" / "scene_editor.py"), run_name="__main__")
+    finally:
+        if not args.sin_parche_guiado:
+            c = CONTADOR_GUIADO
+            print(f"[evaluacion] pasos de guiado: {c['llamadas']}, con cambio en la trayectoria: {c['con_cambio']}")
 
 
 if __name__ == "__main__":
