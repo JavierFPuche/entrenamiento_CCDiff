@@ -2,7 +2,7 @@
 #SBATCH --job-name=ccdiff-eval
 #SBATCH --partition=H200
 #SBATCH --gres=gpu:h200:1
-#SBATCH --time=08:00:00
+#SBATCH --time=23:59:59
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=16
 #SBATCH --output=/raid/%u/Workspace/VLM_ACCIDENTES_CCDIFF/scripts/logs/%x_%j.out
@@ -19,12 +19,17 @@
 # En el DGX, desde VLM_ACCIDENTES_CCDIFF/scripts:
 #   sbatch evaluar.sh
 #   ESCENAS=50 CKPTS="iter100000.ckpt" WCOLS="-50" sbatch evaluar.sh      # otra combinacion
+#   GRUPO=pesos_50esc ESCENAS=50 CKPTS="iter50000.ckpt" WCOLS="0 -50 -200" WOFFS="1 0" sbatch evaluar.sh
+# GRUPO = subcarpeta de evaluaciones/ (asi no se sobrescriben tandas anteriores).
+# WOFFS = pesos del guiado anti-offroad (1 = el del paper; 0 = sin guiado de mapa).
 # ~80-100 s por escena: 20 escenas x 2 checkpoints x 2 pesos ~ 2-3 h.
 
 ENTRENAMIENTO=${ENTRENAMIENTO:-ccdiff_5413/run0}
 CKPTS=${CKPTS:-"iter100000.ckpt iter50000.ckpt"}
 WCOLS=${WCOLS:-"-50 0"}
 ESCENAS=${ESCENAS:-20}
+WOFFS=${WOFFS:-"1"}
+GRUPO=${GRUPO:-$(dirname "${ENTRENAMIENTO}")}
 
 echo "Running on $(hostname)"
 export LANG=C.UTF-8
@@ -50,18 +55,20 @@ MOUNTS="${PATH_TO_SOURCE_CODE}:/workspace"
 
 for CKPT in ${CKPTS}; do
   for W in ${WCOLS}; do
-    echo "================ ${CKPT}  w_collision=${W} ================"
+  for WO in ${WOFFS}; do
+    echo "================ ${CKPT}  w_collision=${W}  w_offroad=${WO} ================"
     srun \
       --container-image="$OUTPUT_SQSH" \
       --container-mounts="$MOUNTS" \
       --container-workdir=/workspace \
       python /workspace/scripts/lanzar_evaluacion.py \
         --ckpt_dir "/workspace/entrenados/${ENTRENAMIENTO}" --ckpt "${CKPT}" \
-        --w_collision "${W}" --escenas "${ESCENAS}" \
-      || echo "AVISO: fallo la evaluacion de ${CKPT} con w_collision=${W}"
+        --w_collision "${W}" --w_offroad "${WO}" --escenas "${ESCENAS}" --grupo "${GRUPO}" \
+      || echo "AVISO: fallo la evaluacion de ${CKPT} con w_collision=${W} w_offroad=${WO}"
+  done
   done
 done
 
 echo "================ RESUMEN ================"
 python3 "${PATH_TO_SOURCE_CODE}/scripts/resumir_evaluacion.py" \
-  "${PATH_TO_SOURCE_CODE}/evaluaciones/$(dirname "${ENTRENAMIENTO}")"
+  "${PATH_TO_SOURCE_CODE}/evaluaciones/${GRUPO}"

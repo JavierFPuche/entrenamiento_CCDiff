@@ -129,7 +129,9 @@ def main():
     ap.add_argument("--sin_video", action="store_true", help="no renderizar videos (mas rapido)")
     ap.add_argument("--nuscenes", default="/workspace/datasets/nuscenes")
     ap.add_argument("--cache", default="/workspace/datasets/trajdata_cache")
-    ap.add_argument("--salida", default=None)
+    ap.add_argument("--salida", default=None, help="carpeta exacta de salida (anula --grupo)")
+    ap.add_argument("--grupo", default=None,
+                    help="subcarpeta de evaluaciones/ (por defecto el nombre del entrenamiento)")
     ap.add_argument("--comprobar", action="store_true", help="muestra la configuracion y sale")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
@@ -142,9 +144,13 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     le.enlazar_cache_home(cache)
 
-    peso = f"{args.w_collision:g}".replace("-", "m")
-    nombre = f"{Path(args.ckpt).stem}_wcol{peso}"
-    salida = Path(args.salida or f"/workspace/evaluaciones/{Path(args.ckpt_dir).parent.name}/{nombre}")
+    def txt(v):
+        return f"{v:g}".replace("-", "m")
+    nombre = f"{Path(args.ckpt).stem}_wcol{txt(args.w_collision)}"
+    if args.w_offroad != 1.0:
+        nombre += f"_woff{txt(args.w_offroad)}"
+    grupo = args.grupo or Path(args.ckpt_dir).parent.name
+    salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
     print(f"[evaluacion] checkpoint: {args.ckpt_dir} :: {args.ckpt}")
     print(f"[evaluacion] w_collision={args.w_collision} w_offroad={args.w_offroad} "
