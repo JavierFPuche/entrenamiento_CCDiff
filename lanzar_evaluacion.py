@@ -34,7 +34,7 @@ import lanzar_entrenamiento as le  # noqa: E402  (mismos arreglos que el entrena
 REGISTRO = "trajdata_nusc_ccdiff"
 
 # Veces que el guiado ha movido de verdad la trayectoria (para comprobarlo en el log)
-CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0}
+CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0, "grad_no_finito": 0}
 
 
 def parchear_guiado_parcial():
@@ -94,16 +94,31 @@ def parchear_guiado_parcial():
                     x_all.reshape((bsize, num_samp, -1, 6)), data_batch)
             antes = hoja.detach().clone()
             tot_loss.backward()
-            if mascara is not None and hoja.grad is not None:
-                hoja.grad.mul_(mascara)
+            if hoja.grad is not None:
+                # Las perdidas de guiado dan gradientes NaN/inf en algunos elementos
+                # (agentes de relleno, distancias nulas...). Con el original no
+                # importaba porque nunca se aplicaban; aqui se anulan, igual que el
+                # gradiente fuera de los agentes/pasos controlados (0*NaN = NaN, por
+                # eso se usa torch.where y no una multiplicacion).
+                g = hoja.grad
+                finito = torch.isfinite(g)
+                CONTADOR_GUIADO["grad_no_finito"] += int((~finito).sum())
+                valido = finito if mascara is None else (finito & mascara)
+                hoja.grad = torch.where(valido, g, torch.zeros_like(g))
             opt.step()
             opt.zero_grad()
-            if perturb_th is not None:
-                with torch.no_grad():
+            with torch.no_grad():
+                if perturb_th is not None:
                     delta = torch.clip(hoja - x_initial, -1 * perturb_th, perturb_th)
                     hoja.data = x_initial + delta
+                # Nunca introducir NaN/inf donde antes habia un valor valido
+                malo = ~torch.isfinite(hoja) & torch.isfinite(antes)
+                if malo.any():
+                    hoja.data[malo] = antes[malo]
             CONTADOR_GUIADO["llamadas"] += 1
-            if not torch.equal(antes, hoja.detach()):
+            ahora = hoja.detach()
+            distinto = (ahora != antes) & ~(torch.isnan(ahora) & torch.isnan(antes))
+            if distinto.any():
                 CONTADOR_GUIADO["con_cambio"] += 1
                 if CONTADOR_GUIADO["con_cambio"] == 1:
                     print("[evaluacion] guiado activo: la trayectoria se modifica (primer paso con cambio)")
@@ -149,6 +164,8 @@ def main():
     nombre = f"{Path(args.ckpt).stem}_wcol{txt(args.w_collision)}"
     if args.w_offroad != 1.0:
         nombre += f"_woff{txt(args.w_offroad)}"
+    if args.sin_parche_guiado:
+        nombre += "_sinparche"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
     salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
@@ -215,7 +232,8 @@ def main():
     finally:
         if not args.sin_parche_guiado:
             c = CONTADOR_GUIADO
-            print(f"[evaluacion] pasos de guiado: {c['llamadas']}, con cambio en la trayectoria: {c['con_cambio']}")
+            print(f"[evaluacion] pasos de guiado: {c['llamadas']}, con cambio en la trayectoria: {c['con_cambio']}, "
+                  f"elementos de gradiente NaN/inf anulados: {c['grad_no_finito']}")
 
 
 if __name__ == "__main__":

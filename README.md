@@ -112,6 +112,8 @@ Cada escena tarda unos 80-100 s (20 replanificaciones × ~4 s). El resumen de to
 - `lanzar_evaluacion.py` optimiza el tensor completo y anula el gradiente fuera de los agentes y pasos controlados.
 - Al final del log aparece `pasos de guiado: N, con cambio en la trayectoria: M`, y M debe ser mayor que 0.
 - `--sin_parche_guiado` reproduce el comportamiento original.
+- **Segunda corrección (09/11).** Las pérdidas de guiado dan gradientes NaN en algunos elementos. La primera versión del parche los aplicaba y llenaba de NaN las trayectorias de todos los agentes, también con peso 0. Por eso **los jobs 5437 y 5448 no son válidos**: con `w_collision=0 w_offroad=0` daban ADE 0,44 frente a 1,30 sin parche. Ahora los gradientes no finitos se anulan y nunca se introduce un NaN en la trayectoria.
+- El log indica cuántos elementos se han anulado. Comprobación de control: con `WCOLS="0" WOFFS="0"` el resultado tiene que coincidir con `--sin_parche_guiado`.
 
 ### Resultado del primer entrenamiento (`ccdiff_5413`, 04/11/2026)
 - 100 000 pasos en unas 9,5 h (2,6 pasos/s en la H200, batch 4), 5 épocas de 20 312 pasos.

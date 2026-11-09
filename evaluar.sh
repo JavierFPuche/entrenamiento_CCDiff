@@ -22,6 +22,8 @@
 #   GRUPO=pesos_50esc ESCENAS=50 CKPTS="iter50000.ckpt" WCOLS="0 -50 -200" WOFFS="1 0" sbatch evaluar.sh
 # GRUPO = subcarpeta de evaluaciones/ (asi no se sobrescriben tandas anteriores).
 # WOFFS = pesos del guiado anti-offroad (1 = el del paper; 0 = sin guiado de mapa).
+# CONTROL=1 anade una ejecucion con --sin_parche_guiado (CCDiff original) por checkpoint,
+#   con w_collision=0 w_offroad=0, para comprobar que el parche no cambia nada sin guiado.
 # ~80-100 s por escena: 20 escenas x 2 checkpoints x 2 pesos ~ 2-3 h.
 
 ENTRENAMIENTO=${ENTRENAMIENTO:-ccdiff_5413/run0}
@@ -30,6 +32,7 @@ WCOLS=${WCOLS:-"-50 0"}
 ESCENAS=${ESCENAS:-20}
 WOFFS=${WOFFS:-"1"}
 GRUPO=${GRUPO:-$(dirname "${ENTRENAMIENTO}")}
+CONTROL=${CONTROL:-0}
 
 echo "Running on $(hostname)"
 export LANG=C.UTF-8
@@ -54,6 +57,17 @@ mkdir -p "${PATH_TO_SOURCE_CODE}"/{entrenados,pruebas,datasets/trajdata_cache,en
 MOUNTS="${PATH_TO_SOURCE_CODE}:/workspace"
 
 for CKPT in ${CKPTS}; do
+  if [ "${CONTROL}" = "1" ]; then
+    echo "================ ${CKPT}  CONTROL: CCDiff original sin parche, sin guiado ================"
+    srun \
+      --container-image="$OUTPUT_SQSH" \
+      --container-mounts="$MOUNTS" \
+      --container-workdir=/workspace \
+      python /workspace/scripts/lanzar_evaluacion.py \
+        --ckpt_dir "/workspace/entrenados/${ENTRENAMIENTO}" --ckpt "${CKPT}" \
+        --w_collision 0 --w_offroad 0 --escenas "${ESCENAS}" --grupo "${GRUPO}" --sin_parche_guiado \
+      || echo "AVISO: fallo la evaluacion de control de ${CKPT}"
+  fi
   for W in ${WCOLS}; do
   for WO in ${WOFFS}; do
     echo "================ ${CKPT}  w_collision=${W}  w_offroad=${WO} ================"
