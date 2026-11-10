@@ -8,6 +8,7 @@ peatones y aceras) dibuja cada agente como su caja orientada:
   gris     = agentes que reproducen nuScenes
   borde negro grueso = la pareja del PRIMER choque, desde el instante del impacto
   borde naranja      = choques posteriores (sin fisica: no son parte del accidente)
+  contorno discontinuo con X = agente que ha dejado de existir (acaba su anotacion)
 
   python /workspace/scripts/dibujar_choques.py /workspace/evaluaciones/ctrl_30esc
   python ... --ejecucion iter50000_wcolm50_lr1_ctrl10 --escena scene-0095
@@ -94,7 +95,10 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
     ax.set_xticks([])
     ax.set_yticks([])
 
-    cajas, rastros = [], []
+    cajas, rastros, fantasmas, cruces = [], [], [], []
+    # ultimo paso valido de cada agente: si deja de existir (fin de la anotacion de
+    # nuScenes), se deja su contorno discontinuo con una cruz en la ultima posicion
+    ultimo = np.full(n, -1)
     for i in range(n):
         color = "#d62728" if i in ctrl else "#7f7f7f"
         p = Polygon(np.zeros((5, 2)), closed=True, fc=color, ec=color, alpha=0.85, lw=1, zorder=3)
@@ -102,6 +106,12 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
         cajas.append(p)
         (r,) = ax.plot([], [], color=color, lw=1.4, alpha=0.6, zorder=2)
         rastros.append(r)
+        f = Polygon(np.zeros((5, 2)), closed=True, fill=False, ec=color, ls="--", lw=1, alpha=0.7, zorder=2)
+        f.set_visible(False)
+        ax.add_patch(f)
+        fantasmas.append(f)
+        (x,) = ax.plot([], [], "x", color=color, ms=7, mew=1.5, zorder=2)
+        cruces.append(x)
     texto = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", fontsize=8,
                     bbox=dict(fc="white", ec="none", alpha=0.8), zorder=5)
     titulo = (f"{cand['escena']}  {cand['ejecucion']}\n1er choque agentes {e['a']}-{e['b']} en t={e['t_s']} s, "
@@ -111,14 +121,24 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
     ax.set_title(titulo, fontsize=8, color="black" if cand.get("aceptada", True) else "#b00000")
 
     def frame(t):
+        if t == 0:
+            ultimo[:] = -1  # matplotlib puede volver a dibujar desde el principio
         for i in range(n):
             if validos[i, t]:
+                ultimo[i] = t
+                fantasmas[i].set_visible(False)
+                cruces[i].set_data([], [])
                 cajas[i].set_xy(esquinas(pos[i, t], yaw[i, t], largo[i], ancho[i]))
                 cajas[i].set_visible(True)
                 ok = validos[i, : t + 1]
                 rastros[i].set_data(pos[i, : t + 1][ok, 0], pos[i, : t + 1][ok, 1])
             else:
                 cajas[i].set_visible(False)
+                if ultimo[i] >= 0:
+                    u = ultimo[i]
+                    fantasmas[i].set_xy(esquinas(pos[i, u], yaw[i, u], largo[i], ancho[i]))
+                    fantasmas[i].set_visible(True)
+                    cruces[i].set_data([pos[i, u, 0]], [pos[i, u, 1]])
             if i in par and t >= t_choque:
                 cajas[i].set_edgecolor("black")
                 cajas[i].set_linewidth(2.5)
@@ -126,7 +146,7 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
                 cajas[i].set_edgecolor("#ff7f0e")  # choque posterior (sin fisica)
                 cajas[i].set_linewidth(2.0)
         texto.set_text(f"t = {t * DT:4.1f} s" + ("   CHOQUE" if t >= t_choque else ""))
-        return cajas + rastros + [texto]
+        return cajas + rastros + fantasmas + cruces + [texto]
 
     # Tras el impacto tbsim no tiene fisica: los coches se atraviesan y siguen. Eso no
     # es parte del accidente (en BeamNG lo resuelve la fisica), asi que se corta.

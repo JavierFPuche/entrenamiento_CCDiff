@@ -179,9 +179,11 @@ Con guiado, 32 de los 48 choques candidatos son alcances. Hay 11 choques en el p
 
 Ahora `analizar_choques.py` solo da por candidato un choque que, hasta el impacto, cumple todo esto:
 - ocurre a partir de 1 s y los coches empiezan separados al menos 2 m;
-- el giro no pasa de 1 rad/s, la aceleración o frenada media en 0,3 s no pasa de 6 m/s² y el derrape no pasa de 35°, todo con el coche a 3 m/s o más;
+- el giro no pasa de 1 rad/s, la aceleración media en 0,3 s no pasa de 5 m/s² y la frenada no pasa de 9,5 m/s² (una frenada de emergencia es plausible antes de un choque) y el derrape no pasa de 35°, todo con el coche a 3 m/s o más;
 - los dos vehículos miden como mucho 7 m.
 
 **El accidente de una escena es su PRIMER choque con un agente controlado (11/11).** Antes se elegía el de mayor velocidad relativa, y en escenas como 0095 o 0099 se marcaba un choque a los 7 s aunque ya había habido otro antes. Después del primer choque tbsim sigue sin física, así que lo demás no es real. Si ese primer choque no pasa el filtro, se descarta la escena entera. `escenas.json` guarda todas las escenas con choque y el motivo de cada descarte. `dibujar.sh` con `EXTRA="--todas"` dibuja también las descartadas (prefijo `DESCARTADA__`), con el primer choque en negro y los posteriores en naranja.
+
+**Coches que aparecen o desaparecen (11/11).** nuScenes solo anota los vehículos cercanos al coche que graba, así que los que reproducen el registro aparecen y desaparecen a mitad de escena. Si eso ocurre a menos de 20 m de los implicados antes del choque, la escena no se puede reproducir con coherencia en BeamNG. Se descarta con el motivo `aparece_desaparece_cerca`, y la columna `pops_cerca` indica qué agente y cuándo (por ejemplo `7-@2.5s` si desaparece y `+` si aparece). En los GIF, un agente que deja de existir queda como contorno discontinuo con una X en su última posición.
 
 El motivo de cada descarte queda en la columna `motivos` de `choques.csv`, y los umbrales están al principio del archivo. `--sin_filtro` vuelve al criterio anterior. Lo que pasa después del impacto no se filtra, porque en BeamNG lo resuelve la física; por eso los GIF se cortan 2 s después (`--completo` para verlos enteros).

@@ -17,7 +17,8 @@ reales. Si ese primer choque no es valido, la escena entera se descarta.
 Escena candidata = choque con algun agente controlado, que no exista ya en el primer
 paso, con los dos coches sobre la calzada, con velocidad relativa >= --v_min m/s y
 PLAUSIBLE hasta el impacto: no antes de T_MIN, sin coches pegados al inicio, sin giros,
-aceleraciones o derrapes imposibles y entre turismos (umbrales al principio del archivo;
+aceleraciones o derrapes imposibles, entre turismos y sin agentes que aparezcan o
+desaparezcan cerca antes del impacto (umbrales al principio del archivo;
 el motivo de cada descarte queda en la columna "motivos" de choques.csv).
 
 Se ejecuta dentro del contenedor (necesita h5py, numpy, shapely y nuscenes-devkit):
@@ -133,10 +134,13 @@ def nombre_mapa(grupo_h5):
 # Umbrales de lo que un coche normal puede hacer ANTES del choque (lo de despues no
 # importa: en BeamNG manda la fisica). Se aplican solo con el coche en marcha.
 YAW_RATE_MAX = 1.0    # rad/s: mas es girar sobre si mismo (con v >= 3 m/s)
-ACEL_MAX = 6.0        # m/s^2: aceleracion o frenada longitudinal sostenida (media de 0,3 s)
+ACEL_MAX = 5.0        # m/s^2: aceleracion sostenida (media de 0,3 s); un turismo rapido da ~5
+FRENO_MAX = 9.5       # m/s^2: frenada sostenida; una frenada de emergencia en seco llega a ~9-10
 DERRAPE_MAX = 35.0    # grados entre la direccion de la velocidad y el morro (con v >= 3 m/s)
 LARGO_MAX = 7.0       # m: mas largo = autobus/camion (BeamNG usa turismos)
 T_MIN = 1.0           # s: un choque antes de esto no tiene fase previa (coches pegados al inicio)
+RADIO_POP = 20.0      # m: un agente que aparece o desaparece (anotacion de nuScenes que empieza o
+                      # acaba) a esta distancia de los implicados antes del choque invalida la escena
 HUECO_MIN = 2.0       # m: separacion minima entre las cajas al inicio
 
 
@@ -145,10 +149,10 @@ def _ang(a):
 
 
 def cinematica(pos, yaw, validos, i, t_fin):
-    """Peores valores de yaw rate, aceleracion y derrape del agente i en [0, t_fin]."""
+    """Peores valores de yaw rate, aceleracion, frenada y derrape del agente i en [0, t_fin]."""
     ok = validos[i, : t_fin + 1]
     idx = np.where(ok)[0]
-    res = dict(yaw_rate=0.0, acel=0.0, derrape=0.0)
+    res = dict(yaw_rate=0.0, acel=0.0, freno=0.0, derrape=0.0)
     if len(idx) < 4:
         return res
     p, y = pos[i, idx], yaw[i, idx]
@@ -163,8 +167,35 @@ def cinematica(pos, yaw, validos, i, t_fin):
     if len(v) >= 4:
         a = np.diff(v) / dt[1:]
         a = np.convolve(a, np.ones(3) / 3, mode="valid")  # media de 0,3 s contra el ruido
-        res["acel"] = float(np.max(np.abs(a))) if len(a) else 0.0
+        if len(a):
+            res["acel"] = float(max(0.0, np.max(a)))
+            res["freno"] = float(max(0.0, -np.min(a)))
     return res
+
+
+def apariciones(validos):
+    """(agente, paso, tipo) de cada vez que un agente aparece o desaparece a mitad de escena."""
+    res = []
+    for k in range(validos.shape[0]):
+        cambios = np.where(validos[k, 1:] != validos[k, :-1])[0] + 1
+        for s_ in cambios:
+            res.append((k, int(s_), "aparece" if validos[k, s_] else "desaparece"))
+    return res
+
+
+def pop_cerca(pos, validos, pops, i, j, t):
+    """Agentes que aparecen/desaparecen cerca de i o j antes del choque (paso t)."""
+    hay = []
+    for k, s_, tipo in pops:
+        if k in (i, j) or s_ > t:
+            continue
+        donde = pos[k, s_] if tipo == "aparece" else pos[k, s_ - 1]
+        for m in (i, j):
+            ref = pos[m, s_] if validos[m, s_] else pos[m, min(t, pos.shape[1] - 1)]
+            if np.isfinite(ref).all() and np.linalg.norm(donde - ref) <= RADIO_POP:
+                hay.append(f"{k}{'+' if tipo == 'aparece' else '-'}@{s_ * DT:.1f}s")
+                break
+    return hay
 
 
 def hueco_inicial(pos, validos, largo, ancho, i, j):
@@ -194,6 +225,7 @@ def choques_escena(g, controlados):
     largo = np.nanmedian(ext[..., 0], axis=1)
     ancho = np.nanmedian(ext[..., 1], axis=1)
     radio = np.hypot(largo, ancho) / 2
+    pops = apariciones(validos)
 
     eventos = []
     for i in range(n):
@@ -230,16 +262,23 @@ def choques_escena(g, controlados):
                         motivos.append("giro_imposible")
                     if max(ki["acel"], kj["acel"]) > ACEL_MAX:
                         motivos.append("acel_imposible")
+                    if max(ki["freno"], kj["freno"]) > FRENO_MAX:
+                        motivos.append("frenada_imposible")
                     if max(ki["derrape"], kj["derrape"]) > DERRAPE_MAX:
                         motivos.append("derrape")
                     if max(largo[i], largo[j]) > LARGO_MAX:
                         motivos.append("vehiculo_grande")
+                    cerca = pop_cerca(pos, validos, pops, i, j, t)
+                    if cerca:
+                        motivos.append("aparece_desaparece_cerca")
                     eventos[-1].update(
                         hueco_inicial=round(hueco, 2),
                         largo_a=round(float(largo[i]), 2), largo_b=round(float(largo[j]), 2),
                         yaw_rate_max=round(max(ki["yaw_rate"], kj["yaw_rate"]), 2),
                         acel_max=round(max(ki["acel"], kj["acel"]), 2),
+                        freno_max=round(max(ki["freno"], kj["freno"]), 2),
                         derrape_max=round(max(ki["derrape"], kj["derrape"]), 1),
+                        pops_cerca=" ".join(cerca),
                         plausible=not motivos, motivos=" ".join(motivos))
                     break  # solo el primer contacto de cada pareja
     return eventos, n, T
@@ -369,7 +408,7 @@ def main():
     campos = ["ejecucion", "escena", "idx", "frame_inicio", "mapa", "n_agentes", "controlados", "a", "b",
               "controlado_a", "controlado_b", "t", "t_s", "ya_al_inicio", "v_a", "v_b", "v_rel",
               "impacto_a", "impacto_b", "calzada_a", "calzada_b", "plausible", "motivos", "hueco_inicial",
-              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "derrape_max", "aceptable", "razones",
+              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "freno_max", "derrape_max", "pops_cerca", "aceptable", "razones",
               "primero", "candidato", "xa", "ya", "xb", "yb"]
     with open(grupo / "choques.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=campos, extrasaction="ignore")
