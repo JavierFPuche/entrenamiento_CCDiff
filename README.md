@@ -114,6 +114,19 @@ Cada escena tarda unos 80-100 s (20 replanificaciones × ~4 s). El resumen de to
 - `--sin_parche_guiado` reproduce el comportamiento original.
 - **Segunda corrección (09/11).** Las pérdidas de guiado dan gradientes NaN en algunos elementos. La primera versión del parche los aplicaba y llenaba de NaN las trayectorias de todos los agentes, también con peso 0. Por eso **los jobs 5437 y 5448 no son válidos**: con `w_collision=0 w_offroad=0` daban ADE 0,44 frente a 1,30 sin parche. Ahora los gradientes no finitos se anulan y nunca se introduce un NaN en la trayectoria.
 - El log indica cuántos elementos se han anulado. Comprobación de control: con `WCOLS="0" WOFFS="0"` el resultado tiene que coincidir con `--sin_parche_guiado`.
+- Control verificado el 10/11 (job 5478, 30 escenas): `wcol0_woff0` y `wcol0_woff0_sinparche` dan resultados idénticos.
+
+**Intensidad del guiado.** En cada paso de difusión se crea un Adam nuevo y se da 1 paso, así que el primer paso de Adam vale `lr · signo(gradiente)`. El tamaño del empujón lo marca `lr` (0,3 por defecto) y no `w_collision`; el peso solo reparte la dirección entre colisión y offroad. Por eso −50 y −200 dan casi lo mismo.
+
+Resultados con iter50000 y 30 escenas:
+
+| configuración | colisiones | ADE |
+| --- | --- | --- |
+| sin guiado | 6,7 % | 1,29 |
+| `w_collision` −50 | 8,9 % | 1,45 |
+| `w_collision` −200 | 9,1 % | 1,46 |
+
+Para guiar con más fuerza hay que subir `--guia_lr` y/o `--guia_pasos`, controlar más agentes con `--controlables`, o ampliar el horizonte (`--n_step_action`). En `evaluar.sh` se hace con `LRS="0.3 1 3"` y `EXTRA="..."`.
 
 ### Resultado del primer entrenamiento (`ccdiff_5413`, 04/11/2026)
 - 100 000 pasos en unas 9,5 h (2,6 pasos/s en la H200, batch 4), 5 épocas de 20 312 pasos.

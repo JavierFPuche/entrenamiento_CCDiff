@@ -148,6 +148,11 @@ def main():
     ap.add_argument("--grupo", default=None,
                     help="subcarpeta de evaluaciones/ (por defecto el nombre del entrenamiento)")
     ap.add_argument("--comprobar", action="store_true", help="muestra la configuracion y sale")
+    ap.add_argument("--guia_lr", type=float, default=None,
+                    help="lr del optimizador de guiado (CCDiff: 0.3). Con Adam y 1 paso, el tamano del "
+                         "empujon depende del lr, NO de w_collision (el peso solo reparte entre perdidas)")
+    ap.add_argument("--guia_pasos", type=int, default=None,
+                    help="pasos de gradiente del guiado en cada paso de difusion (CCDiff: 1)")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
@@ -164,6 +169,12 @@ def main():
     nombre = f"{Path(args.ckpt).stem}_wcol{txt(args.w_collision)}"
     if args.w_offroad != 1.0:
         nombre += f"_woff{txt(args.w_offroad)}"
+    if args.guia_lr is not None:
+        nombre += f"_lr{txt(args.guia_lr)}"
+    if args.guia_pasos is not None:
+        nombre += f"_gs{args.guia_pasos}"
+    if args.controlables != 5:
+        nombre += f"_ctrl{args.controlables}"
     if args.sin_parche_guiado:
         nombre += "_sinparche"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
@@ -194,8 +205,13 @@ def main():
         le.parchear(self, nusc, cache, cambios)
         self.trajdata.num_scenes_to_evaluate = len(escenas)
         self.trajdata.eval_scenes = escenas
+        if args.guia_lr is not None:
+            self.guidance_optimization_params["lr"] = args.guia_lr
+        if args.guia_pasos is not None:
+            self.guidance_optimization_params["grad_steps"] = args.guia_pasos
         self.lock(bloqueada)
         print(f"[evaluacion] rutas sustituidas en: {', '.join(cambios)}")
+        print(f"[evaluacion] optimizador de guiado: {dict(self.guidance_optimization_params)}")
     SceneEditingConfig.__init__ = init
 
     if args.comprobar:
