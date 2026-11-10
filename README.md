@@ -137,3 +137,24 @@ Para guiar con más fuerza hay que subir `--guia_lr` y/o `--guia_pasos`, control
 - **Tiempo por paso en la H200.** No hay referencia publicada, así que el `entrenar_debug.sh` dará la primera medida. Con ella se decide si 24 h bastan o si hay que reanudar.
 - **Batch.** El config de CCDiff usa `batch_size = 4` (comentado `# 100`). Con 141 GB en la H200 seguramente cabe bastante más (`--batch`). Si se cambia, conviene revisar el learning rate.
 - **Caché de trajdata.** La primera vez trajdata procesa todo nuScenes. Se guarda en `datasets/trajdata_cache` y se reutiliza en los siguientes trabajos.
+
+### Choques y escenas candidatas para BeamNG
+
+`analizar_choques.py` lee los `data.hdf5` de un grupo de evaluaciones y busca los choques entre agentes. Para cada pareja usa cajas orientadas con centroide, rumbo y tamaño, y se queda con el primer contacto. Cada choque se clasifica según:
+- si interviene algún agente controlado por CCDiff (los índices se sacan del log del job);
+- si el solape ya existía en el primer paso (artefacto de los datos);
+- la velocidad relativa y el tipo de impacto;
+- si los dos coches estaban sobre la calzada (`drivable_area` del mapa de nuScenes).
+
+Una escena es **candidata** si tiene algún choque con un agente controlado que no existía al inicio, con los dos coches sobre la calzada y una velocidad relativa de al menos `--v_min` (2 m/s por defecto).
+
+```bash
+GRUPO=ctrl_30esc JOBS="5483" sbatch analizar.sh
+```
+
+El resultado se guarda en `evaluaciones/<GRUPO>/choques.csv` (todos los choques) y `candidatas.json` (el mejor choque de cada escena). El log incluye una tabla por ejecución y los índices para volver a simular solo las candidatas con vídeo:
+
+```bash
+GRUPO=videos_candidatas CKPTS="iter50000.ckpt" WCOLS="-50" LRS="1" \
+  EXTRA="--controlables 10 --escenas_idx 3,7,12" sbatch --time=02:00:00 evaluar.sh
+```

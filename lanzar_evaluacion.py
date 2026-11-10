@@ -140,6 +140,9 @@ def main():
                     help="agentes que controla CCDiff (los demas reproducen nuScenes)")
     ap.add_argument("--escenas", type=int, default=20,
                     help="numero de escenas de validacion (CCDiff usa 100; ~80 s por escena)")
+    ap.add_argument("--escenas_idx", default=None,
+                    help="lista de indices de escena separados por comas (anula --escenas), p. ej. 3,7,12; "
+                         "los da analizar_choques.py para volver a simular con video solo las candidatas")
     ap.add_argument("--n_step_action", type=int, default=5, help="replanificar cada N pasos (0,1 s)")
     ap.add_argument("--sin_video", action="store_true", help="no renderizar videos (mas rapido)")
     ap.add_argument("--nuscenes", default="/workspace/datasets/nuscenes")
@@ -182,7 +185,7 @@ def main():
 
     print(f"[evaluacion] checkpoint: {args.ckpt_dir} :: {args.ckpt}")
     print(f"[evaluacion] w_collision={args.w_collision} w_offroad={args.w_offroad} "
-          f"controlables={args.controlables} escenas={args.escenas} CPUs={n_cpus}/{cpus_nodo}")
+          f"controlables={args.controlables} escenas={args.escenas_idx or args.escenas} CPUs={n_cpus}/{cpus_nodo}")
     print(f"[evaluacion] salida: {salida}")
 
     # --- Configuracion: SceneEditingConfig trae rutas fijas y 100 escenas ----
@@ -190,7 +193,10 @@ def main():
     from tbsim.configs.scene_edit_config import SceneEditingConfig
 
     init_original = SceneEditingConfig.__init__
-    escenas = list(range(args.escenas))
+    if args.escenas_idx:
+        escenas = [int(x) for x in args.escenas_idx.split(",") if x.strip()]
+    else:
+        escenas = list(range(args.escenas))
 
     def init(self, *a, **k):
         init_original(self, *a, **k)
