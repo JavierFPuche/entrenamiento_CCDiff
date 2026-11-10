@@ -130,9 +130,12 @@ def choques_escena(g, controlados):
     if yaw.ndim == 3:
         yaw = yaw[..., 0]
     n, T = pos.shape[:2]
-    validos = np.isfinite(pos).all(-1) & np.isfinite(yaw)
+    # tbsim rellena con (0, 0) los pasos en que un agente aun no ha entrado o ya ha
+    # salido de la escena (no con NaN): esos pasos no son posiciones reales.
+    validos = np.isfinite(pos).all(-1) & np.isfinite(yaw) & ~(pos == 0).all(-1)
     vel = np.full_like(pos, np.nan)
     vel[:, 1:] = (pos[:, 1:] - pos[:, :-1]) / DT
+    vel[:, 1:][~(validos[:, 1:] & validos[:, :-1])] = np.nan  # sin saltos desde/hacia el relleno
     largo = np.nanmedian(ext[..., 0], axis=1)
     ancho = np.nanmedian(ext[..., 1], axis=1)
     radio = np.hypot(largo, ancho) / 2

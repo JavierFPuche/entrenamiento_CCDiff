@@ -152,9 +152,21 @@ Una escena es **candidata** si tiene algún choque con un agente controlado que 
 GRUPO=ctrl_30esc JOBS="5483" sbatch analizar.sh
 ```
 
-El resultado se guarda en `evaluaciones/<GRUPO>/choques.csv` (todos los choques) y `candidatas.json` (el mejor choque de cada escena). El log incluye una tabla por ejecución y los índices para volver a simular solo las candidatas con vídeo:
+El resultado se guarda en `evaluaciones/<GRUPO>/choques.csv` (todos los choques) y `candidatas.json` (el mejor choque de cada escena).
+
+tbsim rellena con (0, 0) los pasos en que un agente aún no ha entrado o ya ha salido de la escena; el análisis los descarta. La primera versión no lo hacía y daba miles de choques falsos en el origen.
+
+Para revisar las candidatas **no hay que volver a simular**: la difusión es aleatoria y con otra lista de escenas saldrían otras trayectorias. `dibujar_choques.py` dibuja como GIF lo que ya está guardado en `data.hdf5`, sobre el mapa de nuScenes. Los agentes controlados salen en rojo, los demás en gris, y la pareja que choca con borde negro desde el impacto.
 
 ```bash
-GRUPO=videos_candidatas CKPTS="iter50000.ckpt" WCOLS="-50" LRS="1" \
-  EXTRA="--controlables 10 --escenas_idx 3,7,12" sbatch --time=02:00:00 evaluar.sh
+GRUPO=ctrl_30esc sbatch dibujar.sh      # -> evaluaciones/ctrl_30esc/gifs/
 ```
+
+Resultados del 10/11 (`ctrl_30esc`, iter50000, 10 agentes controlados, lr 1, 30 escenas de Boston):
+
+| configuración | escenas candidatas | choques válidos | velocidad relativa mediana |
+| --- | --- | --- | --- |
+| sin guiado de colisión | 9 | 24 | 4,7 m/s |
+| `w_collision` −50 | 18 | 53 | 7,7 m/s |
+
+Con guiado, 32 de los 48 choques candidatos son alcances. Hay 11 choques en el primer 1,5 s que hay que revisar a ojo.
