@@ -11,7 +11,10 @@ Para cada carpeta de evaluacion (<grupo>/<ejecucion>/scene_edit_eval/data.hdf5):
      con el mejor choque) y muestra un resumen por ejecucion.
 
 Escena candidata = choque con algun agente controlado, que no exista ya en el primer
-paso, con los dos coches sobre la calzada y con velocidad relativa >= --v_min m/s.
+paso, con los dos coches sobre la calzada, con velocidad relativa >= --v_min m/s y
+PLAUSIBLE hasta el impacto: no antes de T_MIN, sin coches pegados al inicio, sin giros,
+aceleraciones o derrapes imposibles y entre turismos (umbrales al principio del archivo;
+el motivo de cada descarte queda en la columna "motivos" de choques.csv).
 
 Se ejecuta dentro del contenedor (necesita h5py, numpy, shapely y nuscenes-devkit):
   python /workspace/scripts/analizar_choques.py /workspace/evaluaciones/ctrl_30esc \\
@@ -122,6 +125,54 @@ def nombre_mapa(grupo_h5):
     return None
 
 
+# ------------------------------------------------------------- plausibilidad
+# Umbrales de lo que un coche normal puede hacer ANTES del choque (lo de despues no
+# importa: en BeamNG manda la fisica). Se aplican solo con el coche en marcha.
+YAW_RATE_MAX = 1.0    # rad/s: mas es girar sobre si mismo (con v >= 3 m/s)
+ACEL_MAX = 6.0        # m/s^2: aceleracion o frenada longitudinal sostenida (media de 0,3 s)
+DERRAPE_MAX = 35.0    # grados entre la direccion de la velocidad y el morro (con v >= 3 m/s)
+LARGO_MAX = 7.0       # m: mas largo = autobus/camion (BeamNG usa turismos)
+T_MIN = 1.0           # s: un choque antes de esto no tiene fase previa (coches pegados al inicio)
+HUECO_MIN = 2.0       # m: separacion minima entre las cajas al inicio
+
+
+def _ang(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def cinematica(pos, yaw, validos, i, t_fin):
+    """Peores valores de yaw rate, aceleracion y derrape del agente i en [0, t_fin]."""
+    ok = validos[i, : t_fin + 1]
+    idx = np.where(ok)[0]
+    res = dict(yaw_rate=0.0, acel=0.0, derrape=0.0)
+    if len(idx) < 4:
+        return res
+    p, y = pos[i, idx], yaw[i, idx]
+    dt = np.diff(idx) * DT
+    v = np.linalg.norm(np.diff(p, axis=0), axis=-1) / dt
+    rapido = v >= 3.0
+    yr = np.abs(_ang(np.diff(y))) / dt
+    if rapido.any():
+        res["yaw_rate"] = float(np.max(yr[rapido]))
+        dirv = np.arctan2(*(np.diff(p, axis=0)[:, ::-1].T))
+        res["derrape"] = float(np.degrees(np.max(np.abs(_ang(dirv - y[1:]))[rapido])))
+    if len(v) >= 4:
+        a = np.diff(v) / dt[1:]
+        a = np.convolve(a, np.ones(3) / 3, mode="valid")  # media de 0,3 s contra el ruido
+        res["acel"] = float(np.max(np.abs(a))) if len(a) else 0.0
+    return res
+
+
+def hueco_inicial(pos, validos, largo, ancho, i, j):
+    """Distancia aproximada entre las cajas en el primer paso en que existen las dos."""
+    ambos = np.where(validos[i] & validos[j])[0]
+    if not len(ambos):
+        return np.inf
+    t0 = ambos[0]
+    d = np.linalg.norm(pos[i, t0] - pos[j, t0])
+    return float(d - (largo[i] + largo[j]) / 4 - (ancho[i] + ancho[j]) / 4)
+
+
 # ------------------------------------------------------------- analisis
 def choques_escena(g, controlados):
     pos = np.asarray(g["centroid"], dtype=float)      # (N, T, 2)
@@ -164,11 +215,33 @@ def choques_escena(g, controlados):
                         xa=float(pos[i, t, 0]), ya=float(pos[i, t, 1]),
                         xb=float(pos[j, t, 0]), yb=float(pos[j, t, 1]),
                     ))
+                    ki, kj = cinematica(pos, yaw, validos, i, t), cinematica(pos, yaw, validos, j, t)
+                    motivos = []
+                    if t * DT < T_MIN:
+                        motivos.append("demasiado_pronto")
+                    hueco = hueco_inicial(pos, validos, largo, ancho, i, j)
+                    if hueco < HUECO_MIN:
+                        motivos.append("pegados_al_inicio")
+                    if max(ki["yaw_rate"], kj["yaw_rate"]) > YAW_RATE_MAX:
+                        motivos.append("giro_imposible")
+                    if max(ki["acel"], kj["acel"]) > ACEL_MAX:
+                        motivos.append("acel_imposible")
+                    if max(ki["derrape"], kj["derrape"]) > DERRAPE_MAX:
+                        motivos.append("derrape")
+                    if max(largo[i], largo[j]) > LARGO_MAX:
+                        motivos.append("vehiculo_grande")
+                    eventos[-1].update(
+                        hueco_inicial=round(hueco, 2),
+                        largo_a=round(float(largo[i]), 2), largo_b=round(float(largo[j]), 2),
+                        yaw_rate_max=round(max(ki["yaw_rate"], kj["yaw_rate"]), 2),
+                        acel_max=round(max(ki["acel"], kj["acel"]), 2),
+                        derrape_max=round(max(ki["derrape"], kj["derrape"]), 1),
+                        plausible=not motivos, motivos=" ".join(motivos))
                     break  # solo el primer contacto de cada pareja
     return eventos, n, T
 
 
-def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min):
+def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
     import h5py
     h5 = carpeta / "scene_edit_eval" / "data.hdf5"
     if not h5.is_file():
@@ -196,7 +269,7 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min):
                     e["calzada_b"] = calzada.sobre_calzada(mapa, e["xb"], e["yb"])
                 e["candidato"] = bool(
                     (e["controlado_a"] or e["controlado_b"]) and not e["ya_al_inicio"]
-                    and e["v_rel"] >= v_min
+                    and e["v_rel"] >= v_min and (e["plausible"] or todos)
                     and e.get("calzada_a", True) and e.get("calzada_b", True))
                 filas.append(e)
             buenos = [e for e in eventos if e["candidato"]]
@@ -217,6 +290,8 @@ def main():
     ap.add_argument("--sin_mapa", action="store_true", help="no comprobar si los coches estaban en la calzada")
     ap.add_argument("--v_min", type=float, default=2.0,
                     help="velocidad relativa minima (m/s) para considerar un choque como accidente")
+    ap.add_argument("--sin_filtro", action="store_true",
+                    help="no exigir plausibilidad (ver columnas motivos/plausible en choques.csv)")
     args = ap.parse_args()
 
     grupo = Path(args.grupo)
@@ -235,7 +310,7 @@ def main():
     todas_filas, todas_cand = [], []
     print(f"\n{'ejecucion':<40} {'escenas':>7} {'con choque':>10} {'choque ctrl':>11} {'candidatas':>10}")
     for carpeta in sorted(p for p in grupo.iterdir() if p.is_dir()):
-        r = analizar_ejecucion(carpeta, ctrl.get(carpeta.name, {}), calzada, args.v_min)
+        r = analizar_ejecucion(carpeta, ctrl.get(carpeta.name, {}), calzada, args.v_min, args.sin_filtro)
         if r is None:
             continue
         escenas_choque = {(e["escena"], e["frame_inicio"]) for e in r["filas"] if not e["ya_al_inicio"]}
@@ -251,6 +326,14 @@ def main():
             if fuera > 0.5:
                 print(f"   AVISO: el {fuera:.0%} de los choques sale fuera de la calzada; puede que las "
                       "coordenadas de trajdata no coincidan con las del mapa. Revisalo o usa --sin_mapa.")
+        ctrl_nuevos = [e for e in r["filas"] if not e["ya_al_inicio"]
+                       and (e["controlado_a"] or e["controlado_b"])]
+        motivos = {}
+        for e in ctrl_nuevos:
+            for m in e["motivos"].split():
+                motivos[m] = motivos.get(m, 0) + 1
+        if motivos:
+            print("   descartados por: " + ", ".join(f"{k} {v}" for k, v in sorted(motivos.items())))
         todas_filas += r["filas"]
         todas_cand += r["candidatas"]
 
@@ -259,7 +342,8 @@ def main():
 
     campos = ["ejecucion", "escena", "idx", "frame_inicio", "mapa", "n_agentes", "controlados", "a", "b",
               "controlado_a", "controlado_b", "t", "t_s", "ya_al_inicio", "v_a", "v_b", "v_rel",
-              "impacto_a", "impacto_b", "calzada_a", "calzada_b", "candidato", "xa", "ya", "xb", "yb"]
+              "impacto_a", "impacto_b", "calzada_a", "calzada_b", "plausible", "motivos", "hueco_inicial",
+              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "derrape_max", "candidato", "xa", "ya", "xb", "yb"]
     with open(grupo / "choques.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=campos, extrasaction="ignore")
         w.writeheader()

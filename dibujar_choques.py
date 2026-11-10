@@ -61,7 +61,7 @@ def fondo_mapa(ax, nuscenes, mapa, caja):
     return True
 
 
-def dibujar(g, cand, salida, nuscenes, radio, fps):
+def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
     pos = np.asarray(g["centroid"], dtype=float)
     yaw = np.asarray(g["yaw"], dtype=float)
     if yaw.ndim == 3:
@@ -117,7 +117,10 @@ def dibujar(g, cand, salida, nuscenes, radio, fps):
         texto.set_text(f"t = {t * DT:4.1f} s" + ("   CHOQUE" if t >= t_choque else ""))
         return cajas + rastros + [texto]
 
-    anim = FuncAnimation(fig, frame, frames=range(T), blit=False)
+    # Tras el impacto tbsim no tiene fisica: los coches se atraviesan y siguen. Eso no
+    # es parte del accidente (en BeamNG lo resuelve la fisica), asi que se corta.
+    fin = T if tras_choque is None else min(T, t_choque + int(round(tras_choque / DT)) + 1)
+    anim = FuncAnimation(fig, frame, frames=range(fin), blit=False)
     anim.save(str(salida), writer=PillowWriter(fps=fps))
     plt.close(fig)
     return hay_mapa
@@ -131,6 +134,9 @@ def main():
     ap.add_argument("--nuscenes", default="/workspace/datasets/nuscenes")
     ap.add_argument("--radio", type=float, default=40.0, help="mitad del lado de la vista (m)")
     ap.add_argument("--fps", type=int, default=10, help="10 = tiempo real")
+    ap.add_argument("--tras_choque", type=float, default=2.0,
+                    help="segundos que se dibujan despues del impacto (sin fisica, los coches se atraviesan)")
+    ap.add_argument("--completo", action="store_true", help="dibujar los 10 s enteros")
     args = ap.parse_args()
 
     import h5py
@@ -151,7 +157,8 @@ def main():
             if clave not in f:
                 print(f"AVISO: {clave} no esta en {h5}")
                 continue
-            hay_mapa = dibujar(f[clave], c, salida, args.nuscenes, args.radio, args.fps)
+            hay_mapa = dibujar(f[clave], c, salida, args.nuscenes, args.radio, args.fps,
+                               None if args.completo else args.tras_choque)
         print(f"{salida}{'' if hay_mapa else '  (sin mapa)'}")
 
 

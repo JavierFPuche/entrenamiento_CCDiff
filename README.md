@@ -170,3 +170,16 @@ Resultados del 10/11 (`ctrl_30esc`, iter50000, 10 agentes controlados, lr 1, 30 
 | `w_collision` −50 | 18 | 53 | 7,7 m/s |
 
 Con guiado, 32 de los 48 choques candidatos son alcances. Hay 11 choques en el primer 1,5 s que hay que revisar a ojo.
+
+**Filtro de plausibilidad (11/11).** Al revisar los GIF salieron cuatro tipos de incoherencia:
+- choques en el primer segundo entre coches que ya nacen pegados en nuScenes (cola de semáforo);
+- agentes controlados que giran sobre sí mismos o se desplazan de lado;
+- autobuses y camiones, que en nuScenes a veces son dos cajas solapadas (articulados);
+- después del impacto los coches se atraviesan, porque tbsim no tiene física.
+
+Ahora `analizar_choques.py` solo da por candidato un choque que, hasta el impacto, cumple todo esto:
+- ocurre a partir de 1 s y los coches empiezan separados al menos 2 m;
+- el giro no pasa de 1 rad/s, la aceleración o frenada media en 0,3 s no pasa de 6 m/s² y el derrape no pasa de 35°, todo con el coche a 3 m/s o más;
+- los dos vehículos miden como mucho 7 m.
+
+El motivo de cada descarte queda en la columna `motivos` de `choques.csv`, y los umbrales están al principio del archivo. `--sin_filtro` vuelve al criterio anterior. Lo que pasa después del impacto no se filtra, porque en BeamNG lo resuelve la física; por eso los GIF se cortan 2 s después (`--completo` para verlos enteros).

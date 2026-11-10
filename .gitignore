@@ -8,3 +8,6 @@ resultados/
 *.tgz
 *.zip
 __pycache__/
+gifs/
+*.gif
+*.tar.gz
