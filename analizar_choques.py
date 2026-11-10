@@ -7,8 +7,12 @@ Para cada carpeta de evaluacion (<grupo>/<ejecucion>/scene_edit_eval/data.hdf5):
      nuScenes). Los indices controlados se leen del log del job ("set guidance dim").
   3. Comprueba con el mapa de nuScenes si los dos coches estaban sobre la calzada
      (capa drivable_area) en el momento del choque.
-  4. Escribe choques.csv (todos los choques) y candidatas.json (una escena por fila,
-     con el mejor choque) y muestra un resumen por ejecucion.
+  4. Escribe choques.csv (todos los choques), escenas.json (cada escena con choque:
+     su PRIMER choque, si se acepta y por que no) y candidatas.json (solo las aceptadas).
+
+El accidente de una escena es su PRIMER choque con un agente controlado: despues,
+tbsim sigue sin fisica (los coches se atraviesan) y los choques siguientes no son
+reales. Si ese primer choque no es valido, la escena entera se descarta.
 
 Escena candidata = choque con algun agente controlado, que no exista ya en el primer
 paso, con los dos coches sobre la calzada, con velocidad relativa >= --v_min m/s y
@@ -246,7 +250,7 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
     h5 = carpeta / "scene_edit_eval" / "data.hdf5"
     if not h5.is_file():
         return None
-    filas, candidatas, n_escenas, sin_ctrl = [], [], 0, 0
+    filas, candidatas, escenas, n_escenas, sin_ctrl = [], [], [], 0, 0
     with h5py.File(h5, "r") as f:
         for clave in sorted(f.keys()):
             m = re.fullmatch(r"(scene-\d+)_(\d+)", clave)
@@ -267,17 +271,39 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
                 if calzada is not None and mapa:
                     e["calzada_a"] = calzada.sobre_calzada(mapa, e["xa"], e["ya"])
                     e["calzada_b"] = calzada.sobre_calzada(mapa, e["xb"], e["yb"])
-                e["candidato"] = bool(
-                    (e["controlado_a"] or e["controlado_b"]) and not e["ya_al_inicio"]
-                    and e["v_rel"] >= v_min and (e["plausible"] or todos)
-                    and e.get("calzada_a", True) and e.get("calzada_b", True))
+                razones = [] if (e["plausible"] or todos) else e["motivos"].split()
+                if e["v_rel"] < v_min:
+                    razones.append("v_rel_baja")
+                if not (e.get("calzada_a", True) and e.get("calzada_b", True)):
+                    razones.append("fuera_calzada")
+                e["aceptable"] = not razones
+                e["razones"] = " ".join(razones)
+                e["primero"] = False
+                e["candidato"] = False
                 filas.append(e)
-            buenos = [e for e in eventos if e["candidato"]]
+            # El accidente de la escena es el PRIMER choque con un agente controlado: tras
+            # el, tbsim sigue sin fisica (los coches se atraviesan) y lo demas no es real.
+            # Si ese primero no vale, la escena se descarta (no se busca otro mas tarde).
+            relevantes = sorted((e for e in eventos if not e["ya_al_inicio"]
+                                 and (e["controlado_a"] or e["controlado_b"])), key=lambda e: e["t"])
+            if not relevantes:
+                continue
+            t1 = relevantes[0]["t"]
+            primeros = [e for e in relevantes if e["t"] == t1]
+            for e in primeros:
+                e["primero"] = True
+            buenos = [e for e in primeros if e["aceptable"]]
+            elegido = max(buenos, key=lambda e: e["v_rel"]) if buenos else primeros[0]
             if buenos:
-                mejor = max(buenos, key=lambda e: e["v_rel"])
-                candidatas.append(dict(ejecucion=carpeta.name, escena=escena, frame_inicio=frame, idx=idx,
-                                       mapa=mapa, n_choques=len(buenos), mejor=mejor))
-    return dict(filas=filas, candidatas=candidatas, n_escenas=n_escenas, sin_ctrl=sin_ctrl)
+                elegido["candidato"] = True
+            choques = [dict(a=e["a"], b=e["b"], t=e["t"]) for e in relevantes]
+            registro = dict(ejecucion=carpeta.name, escena=escena, frame_inicio=frame, idx=idx, mapa=mapa,
+                            n_choques=len(relevantes), mejor=elegido, choques=choques,
+                            aceptada=bool(buenos), razon="" if buenos else elegido["razones"])
+            escenas.append(registro)
+            if buenos:
+                candidatas.append(registro)
+    return dict(filas=filas, candidatas=candidatas, escenas=escenas, n_escenas=n_escenas, sin_ctrl=sin_ctrl)
 
 
 def main():
@@ -307,7 +333,7 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"AVISO: no puedo cargar los mapas de nuScenes ({e}); sigo sin comprobar la calzada")
 
-    todas_filas, todas_cand = [], []
+    todas_filas, todas_cand, todas_esc = [], [], []
     print(f"\n{'ejecucion':<40} {'escenas':>7} {'con choque':>10} {'choque ctrl':>11} {'candidatas':>10}")
     for carpeta in sorted(p for p in grupo.iterdir() if p.is_dir()):
         r = analizar_ejecucion(carpeta, ctrl.get(carpeta.name, {}), calzada, args.v_min, args.sin_filtro)
@@ -326,16 +352,16 @@ def main():
             if fuera > 0.5:
                 print(f"   AVISO: el {fuera:.0%} de los choques sale fuera de la calzada; puede que las "
                       "coordenadas de trajdata no coincidan con las del mapa. Revisalo o usa --sin_mapa.")
-        ctrl_nuevos = [e for e in r["filas"] if not e["ya_al_inicio"]
-                       and (e["controlado_a"] or e["controlado_b"])]
-        motivos = {}
-        for e in ctrl_nuevos:
-            for m in e["motivos"].split():
-                motivos[m] = motivos.get(m, 0) + 1
-        if motivos:
-            print("   descartados por: " + ", ".join(f"{k} {v}" for k, v in sorted(motivos.items())))
+        razones = {}
+        for esc in r["escenas"]:
+            for m in esc["razon"].split():
+                razones[m] = razones.get(m, 0) + 1
+        if razones:
+            print("   escenas descartadas (su PRIMER choque) por: "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(razones.items())))
         todas_filas += r["filas"]
         todas_cand += r["candidatas"]
+        todas_esc += r["escenas"]
 
     if not todas_filas:
         sys.exit(f"No hay choques (o no hay data.hdf5) bajo {grupo}")
@@ -343,15 +369,18 @@ def main():
     campos = ["ejecucion", "escena", "idx", "frame_inicio", "mapa", "n_agentes", "controlados", "a", "b",
               "controlado_a", "controlado_b", "t", "t_s", "ya_al_inicio", "v_a", "v_b", "v_rel",
               "impacto_a", "impacto_b", "calzada_a", "calzada_b", "plausible", "motivos", "hueco_inicial",
-              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "derrape_max", "candidato", "xa", "ya", "xb", "yb"]
+              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "derrape_max", "aceptable", "razones",
+              "primero", "candidato", "xa", "ya", "xb", "yb"]
     with open(grupo / "choques.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=campos, extrasaction="ignore")
         w.writeheader()
         w.writerows(todas_filas)
     todas_cand.sort(key=lambda c: (c["ejecucion"], -c["mejor"]["v_rel"]))
     (grupo / "candidatas.json").write_text(json.dumps(todas_cand, indent=1))
+    todas_esc.sort(key=lambda c: (c["ejecucion"], c["escena"]))
+    (grupo / "escenas.json").write_text(json.dumps(todas_esc, indent=1))
 
-    print("\nCandidatas (mejor choque de cada escena, ordenadas por velocidad relativa):")
+    print("\nCandidatas (PRIMER choque de cada escena, ordenadas por velocidad relativa):")
     for c in todas_cand:
         e = c["mejor"]
         print(f"  {c['ejecucion']:<36} {c['escena']} (frame {c['frame_inicio']:>3})  t={e['t_s']:>4.1f}s  "
@@ -360,7 +389,8 @@ def main():
         idx = sorted({c["idx"] for c in todas_cand if c["ejecucion"] == ejec and c["idx"] is not None})
         if idx:
             print(f"\n{ejec}: para verlas con video -> EXTRA=\"--escenas_idx {','.join(map(str, idx))} ...\"")
-    print(f"\nGuardado: {grupo / 'choques.csv'} y {grupo / 'candidatas.json'}")
+    print(f"\nGuardado: {grupo / 'choques.csv'}, {grupo / 'candidatas.json'} y {grupo / 'escenas.json'} "
+          "(todas las escenas con choque, aceptadas o no, con el motivo)")
 
 
 if __name__ == "__main__":

@@ -182,4 +182,6 @@ Ahora `analizar_choques.py` solo da por candidato un choque que, hasta el impact
 - el giro no pasa de 1 rad/s, la aceleración o frenada media en 0,3 s no pasa de 6 m/s² y el derrape no pasa de 35°, todo con el coche a 3 m/s o más;
 - los dos vehículos miden como mucho 7 m.
 
+**El accidente de una escena es su PRIMER choque con un agente controlado (11/11).** Antes se elegía el de mayor velocidad relativa, y en escenas como 0095 o 0099 se marcaba un choque a los 7 s aunque ya había habido otro antes. Después del primer choque tbsim sigue sin física, así que lo demás no es real. Si ese primer choque no pasa el filtro, se descarta la escena entera. `escenas.json` guarda todas las escenas con choque y el motivo de cada descarte. `dibujar.sh` con `EXTRA="--todas"` dibuja también las descartadas (prefijo `DESCARTADA__`), con el primer choque en negro y los posteriores en naranja.
+
 El motivo de cada descarte queda en la columna `motivos` de `choques.csv`, y los umbrales están al principio del archivo. `--sin_filtro` vuelve al criterio anterior. Lo que pasa después del impacto no se filtra, porque en BeamNG lo resuelve la física; por eso los GIF se cortan 2 s después (`--completo` para verlos enteros).

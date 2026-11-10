@@ -6,7 +6,8 @@ otras muestras de la difusion). Encima del mapa de nuScenes (calzada, pasos de
 peatones y aceras) dibuja cada agente como su caja orientada:
   rojo     = agentes controlados por CCDiff
   gris     = agentes que reproducen nuScenes
-  borde negro grueso = la pareja del choque, desde el instante del impacto
+  borde negro grueso = la pareja del PRIMER choque, desde el instante del impacto
+  borde naranja      = choques posteriores (sin fisica: no son parte del accidente)
 
   python /workspace/scripts/dibujar_choques.py /workspace/evaluaciones/ctrl_30esc
   python ... --ejecucion iter50000_wcolm50_lr1_ctrl10 --escena scene-0095
@@ -75,6 +76,11 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
     e = cand["mejor"]
     ctrl = {int(x) for x in str(e.get("controlados", "")).split()}
     par, t_choque = {e["a"], e["b"]}, e["t"]
+    # momento del primer choque de cada agente (el principal y los posteriores, sin fisica)
+    t_de = {}
+    for ch in cand.get("choques", [dict(a=e["a"], b=e["b"], t=e["t"])]):
+        for k in (ch["a"], ch["b"]):
+            t_de[k] = min(t_de.get(k, 10 ** 9), ch["t"])
     cx, cy = (e["xa"] + e["xb"]) / 2, (e["ya"] + e["yb"]) / 2
     caja = (cx - radio, cy - radio, cx + radio, cy + radio)
 
@@ -98,9 +104,11 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
         rastros.append(r)
     texto = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", fontsize=8,
                     bbox=dict(fc="white", ec="none", alpha=0.8), zorder=5)
-    titulo = (f"{cand['escena']}  {cand['ejecucion']}\nchoque agentes {e['a']}-{e['b']} en t={e['t_s']} s, "
+    titulo = (f"{cand['escena']}  {cand['ejecucion']}\n1er choque agentes {e['a']}-{e['b']} en t={e['t_s']} s, "
               f"v_rel={e['v_rel']} m/s ({e['impacto_a']}/{e['impacto_b']})")
-    ax.set_title(titulo, fontsize=8)
+    if not cand.get("aceptada", True):
+        titulo += f"\nDESCARTADA: {cand.get('razon', '')}"
+    ax.set_title(titulo, fontsize=8, color="black" if cand.get("aceptada", True) else "#b00000")
 
     def frame(t):
         for i in range(n):
@@ -114,6 +122,9 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
             if i in par and t >= t_choque:
                 cajas[i].set_edgecolor("black")
                 cajas[i].set_linewidth(2.5)
+            elif i in t_de and t >= t_de[i]:
+                cajas[i].set_edgecolor("#ff7f0e")  # choque posterior (sin fisica)
+                cajas[i].set_linewidth(2.0)
         texto.set_text(f"t = {t * DT:4.1f} s" + ("   CHOQUE" if t >= t_choque else ""))
         return cajas + rastros + [texto]
 
@@ -137,11 +148,16 @@ def main():
     ap.add_argument("--tras_choque", type=float, default=2.0,
                     help="segundos que se dibujan despues del impacto (sin fisica, los coches se atraviesan)")
     ap.add_argument("--completo", action="store_true", help="dibujar los 10 s enteros")
+    ap.add_argument("--todas", action="store_true",
+                    help="dibujar tambien las escenas descartadas (escenas.json), con el motivo en el titulo")
     args = ap.parse_args()
 
     import h5py
     grupo = Path(args.grupo)
-    candidatas = json.loads((grupo / "candidatas.json").read_text())
+    if args.todas and (grupo / "escenas.json").is_file():
+        candidatas = json.loads((grupo / "escenas.json").read_text())
+    else:
+        candidatas = json.loads((grupo / "candidatas.json").read_text())
     if args.ejecucion:
         candidatas = [c for c in candidatas if c["ejecucion"] == args.ejecucion]
     if args.escena:
@@ -152,7 +168,8 @@ def main():
     for c in candidatas:
         h5 = grupo / c["ejecucion"] / "scene_edit_eval" / "data.hdf5"
         clave = f"{c['escena']}_{c['frame_inicio']}"
-        salida = destino / f"{c['ejecucion']}__{c['escena']}.gif"
+        prefijo = "" if c.get("aceptada", True) else "DESCARTADA__"
+        salida = destino / f"{prefijo}{c['ejecucion']}__{c['escena']}.gif"
         with h5py.File(h5, "r") as f:
             if clave not in f:
                 print(f"AVISO: {clave} no esta en {h5}")
