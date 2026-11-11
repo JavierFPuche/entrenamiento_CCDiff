@@ -37,7 +37,7 @@ REGISTRO = "trajdata_nusc_ccdiff"
 CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0, "grad_no_finito": 0}
 # Pruebas de que los guiados nuevos se ejecutan (job 5511/5512: w_ego 1 y 3 daban
 # metricas identicas y no habia forma de saber si intercepta_ego llegaba a calcularse)
-CONTADOR_EGO = {"intercepta": 0, "evita": 0, "dmin_suma": 0.0, "dmin_n": 0}
+CONTADOR_EGO = {"intercepta": 0, "evita": 0, "dmin_suma": 0.0, "dmin_n": 0, "nan_ego": 0, "nan_adv": 0}
 
 
 def parchear_guiado_parcial():
@@ -313,13 +313,26 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                 # agentes y la fila del ego (distancia 0) daba gradiente NaN (0/0) aunque
                 # luego se multiplicara por 0. Con eps la raiz es derivable en 0.
                 ego_traj = pos_w[self.ego].detach()                          # (N, T, 2)
-                dif = pos_w[a] - ego_traj
+                adv_traj = pos_w[a]
+                # Job 5516/5517: dmin medio = nan. Un solo instante NaN (plan del ego o del
+                # adversario) hacia min() = NaN -> relu(NaN) con gradiente 0: la perdida no
+                # empujaba nada. Se ignoran los instantes no finitos.
+                fin_e = torch.isfinite(ego_traj).all(-1)                     # (N, T)
+                fin_a = torch.isfinite(adv_traj.detach()).all(-1)
+                CONTADOR_EGO["nan_ego"] += int((~fin_e).any())
+                CONTADOR_EGO["nan_adv"] += int((~fin_a).any())
+                ok = fin_e & fin_a
+                dif = torch.where(ok.unsqueeze(-1), adv_traj - torch.nan_to_num(ego_traj),
+                                  torch.zeros_like(adv_traj))
                 dist = torch.sqrt((dif ** 2).sum(-1) + 1e-6)                 # (N, T)
+                dist = torch.where(ok, dist, torch.full_like(dist, 1e6))
                 dmin = dist.min(dim=-1).values                               # (N,)
-                perdida[a] = torch.relu(dmin - self.radio)
+                hay = ok.any(-1)                                             # (N,)
+                perdida[a] = torch.where(hay, torch.relu(dmin - self.radio), torch.zeros_like(dmin))
                 CONTADOR_EGO["intercepta"] += 1
-                CONTADOR_EGO["dmin_suma"] += float(dmin.detach().mean())
-                CONTADOR_EGO["dmin_n"] += 1
+                if bool(hay.any()):
+                    CONTADOR_EGO["dmin_suma"] += float(dmin.detach()[hay].mean())
+                    CONTADOR_EGO["dmin_n"] += 1
             return perdida[agt_mask] if agt_mask is not None else perdida
     gl.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
 
@@ -575,7 +588,9 @@ def main():
             e = CONTADOR_EGO
             media = e["dmin_suma"] / e["dmin_n"] if e["dmin_n"] else float("nan")
             print(f"[evaluacion] guiados del ego: intercepta_ego calculado {e['intercepta']} veces "
-                  f"(dmin medio adversario-ego en el plan: {media:.1f} m), evita_otros {e['evita']} veces")
+                  f"(dmin medio adversario-ego en el plan: {media:.1f} m, en {e['dmin_n']} llamadas con "
+                  f"datos validos), evita_otros {e['evita']} veces")
+            print(f"[evaluacion] llamadas con NaN en el plan: del ego {e['nan_ego']}, del adversario {e['nan_adv']}")
             if e["intercepta"] == 0:
                 print("[evaluacion] AVISO: intercepta_ego NUNCA se ha calculado: el guiado hacia el ego no actua")
 
