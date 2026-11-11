@@ -4,7 +4,8 @@ No vuelve a simular nada: usa las trayectorias guardadas, asi que el GIF muestra
 exactamente el choque que encontro el analisis (re-simular con --escenas_idx daria
 otras muestras de la difusion). Encima del mapa de nuScenes (calzada, pasos de
 peatones y aceras) dibuja cada agente como su caja orientada:
-  rojo     = agentes controlados por CCDiff
+  azul     = ego (con --objetivo_ego no esta controlado: reproduce nuScenes)
+  rojo     = agentes controlados por CCDiff (el adversario, con contorno amarillo)
   gris     = agentes que reproducen nuScenes
   borde negro grueso = la pareja del PRIMER choque, desde el instante del impacto
   borde naranja      = choques posteriores (sin fisica: no son parte del accidente)
@@ -76,6 +77,7 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
 
     e = cand["mejor"]
     ctrl = {int(x) for x in str(e.get("controlados", "")).split()}
+    ego, adv = cand.get("ego"), cand.get("adversario")
     par, t_choque = {e["a"], e["b"]}, e["t"]
     # momento del primer choque de cada agente (el principal y los posteriores, sin fisica)
     t_de = {}
@@ -100,8 +102,9 @@ def dibujar(g, cand, salida, nuscenes, radio, fps, tras_choque=2.0):
     # nuScenes), se deja su contorno discontinuo con una cruz en la ultima posicion
     ultimo = np.full(n, -1)
     for i in range(n):
-        color = "#d62728" if i in ctrl else "#7f7f7f"
-        p = Polygon(np.zeros((5, 2)), closed=True, fc=color, ec=color, alpha=0.85, lw=1, zorder=3)
+        color = "#1f77b4" if i == ego else ("#d62728" if i in ctrl else "#7f7f7f")
+        p = Polygon(np.zeros((5, 2)), closed=True, fc=color, ec="#ffbf00" if i == adv else color,
+                    alpha=0.85, lw=2.5 if i == adv else 1, zorder=3)
         ax.add_patch(p)
         cajas.append(p)
         (r,) = ax.plot([], [], color=color, lw=1.4, alpha=0.6, zorder=2)

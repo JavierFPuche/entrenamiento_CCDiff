@@ -51,7 +51,7 @@ def leer_controlados(log_path):
     """
     res, actual, pendiente, escena = {}, None, None, None
     indice = {}  # posicion de cada lote (1 escena) en eval_scenes, para --escenas_idx
-    ego_pendiente = None
+    ego_pendiente = adv_pendiente = None
     patron_lista = re.compile(r"\[([0-9,\s]*)\]")
     for linea in Path(log_path).read_text(errors="replace").splitlines():
         if linea.startswith("[evaluacion] salida:"):
@@ -63,6 +63,8 @@ def leer_controlados(log_path):
         elif linea.startswith("[evaluacion] ego:") and actual is not None:
             m = re.search(r"ego:\s*(\d+)", linea)
             ego_pendiente = int(m.group(1)) if m else None
+            m = re.search(r"adversario:\s*(\d+)", linea)
+            adv_pendiente = int(m.group(1)) if m else None
         elif linea.startswith("set guidance dim:"):
             m = patron_lista.search(linea)
             pendiente = [int(x) for x in m.group(1).split(",") if x.strip()] if m else None
@@ -71,9 +73,9 @@ def leer_controlados(log_path):
         elif escena and re.fullmatch(r"\[\d+\]", linea.strip()):
             if actual is not None:
                 res[actual][(escena, int(linea.strip()[1:-1]))] = dict(ctrl=pendiente, idx=indice[actual],
-                                                                        ego=ego_pendiente)
+                                                                        ego=ego_pendiente, adversario=adv_pendiente)
                 indice[actual] += 1
-            escena, pendiente, ego_pendiente = None, None, None
+            escena, pendiente, ego_pendiente, adv_pendiente = None, None, None, None
     return res
 
 
@@ -368,6 +370,7 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False, so
                 elegido["candidato"] = True
             choques = [dict(a=e["a"], b=e["b"], t=e["t"]) for e in relevantes]
             registro = dict(ejecucion=carpeta.name, escena=escena, frame_inicio=frame, idx=idx, mapa=mapa,
+                            ego=ego, adversario=info.get("adversario"),
                             n_choques=len(relevantes), mejor=elegido, choques=choques,
                             aceptada=bool(buenos), razon="" if buenos else elegido["razones"])
             escenas.append(registro)

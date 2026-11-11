@@ -198,6 +198,8 @@ El objetivo es un banco de accidentes para generar clips de anticipación en Bea
 - Se elige **un adversario** por escena: un agente en movimiento, a menos de 60 m y delante o a los lados del ego (±100°), sorteado entre los 3 más cercanos. `--semilla` cambia el sorteo.
 - **Guiado nuevo, `intercepta_ego`** (peso `--w_ego`, 1 por defecto): solo para el adversario, minimiza la distancia mínima entre su plan y el del ego en el horizonte de 5,2 s. La pérdida de colisión original de CCDiff solo actúa cuando dos coches ya están casi tocándose (a menos de su radio más 0,2 m), así que por sí sola no lleva a nadie hacia el ego. La prueba 11/11 dio `guide_agent_collision = 0` y el guiado solo cambió la trayectoria en 139 de 5.940 pasos.
 - La pérdida de colisión original solo cuenta los choques **con el ego** (`excluded_agents` = todos los demás) y cierra el último tramo.
+- **Guiado nuevo, `evita_otros`** (peso `--w_evita`, 1 por defecto): el adversario esquiva a todos los agentes menos al ego (3 discos por coche y 0,5 m de margen). Sin él, en la prueba del 11/11 el adversario chocaba de camino contra un autobús o un coche parado (0093, 0095).
+- En los GIF, el ego sale en azul y el adversario en rojo con contorno amarillo.
 - El log guarda `[evaluacion] ego: <i> adversario: <j>` de cada escena.
 
 ```bash

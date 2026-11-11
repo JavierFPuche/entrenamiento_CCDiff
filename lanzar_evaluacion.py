@@ -140,6 +140,8 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
     - Guiado nuevo "intercepta_ego" (largo alcance): solo para el adversario, minimiza la
       distancia minima entre su plan y el del ego en el horizonte. La perdida de colision
       original solo actua a <~0,2 m de contacto, asi que por si sola no lleva a nadie al ego.
+    - Guiado nuevo "evita_otros": el adversario esquiva a todos los demas agentes; sin el,
+      en la prueba del 11/11 el adversario chocaba con otros coches de camino al ego.
     - La perdida de colision original se limita a los pares con el ego (excluded_agents).
     En el log queda "[evaluacion] ego: <i> adversario: <j>" para analizar_choques.py.
     """
@@ -243,9 +245,53 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
             perdida = perdida * solo_adv
             return perdida[agt_mask] if agt_mask is not None else perdida
     gl.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
+
+    class EvitaOtrosLoss(gl.GuidanceLoss):
+        """El adversario no debe chocar con nadie MAS que con el ego.
+
+        Cada coche se aproxima con 3 discos a lo largo (radio = medio ancho). Penaliza
+        la invasion de la distancia de seguridad entre los discos del adversario y los
+        de cualquier otro agente que no sea el ego. Solo actua de cerca, como la perdida
+        de colision original, pero con peso positivo (repulsion).
+        """
+        def __init__(self, ego, adversario, margen=0.5, discos=3):
+            super().__init__()
+            self.ego, self.adversario = int(ego), int(adversario)
+            self.margen, self.discos = margen, discos
+
+        def _discos(self, pos, yaw, extent):
+            largo, ancho = extent[:, 0], extent[:, 1]
+            r = ancho / 2
+            mitad = torch.clamp(largo / 2 - r, min=0.0)
+            s = torch.linspace(-1, 1, self.discos, device=pos.device)              # (D,)
+            off = mitad[:, None] * s[None]                                         # (B, D)
+            u = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)              # (B, N, T, 2)
+            return pos.unsqueeze(-2) + off[:, None, None, :, None] * u.unsqueeze(-2), r   # (B,N,T,D,2)
+
+        def forward(self, x, data_batch, agt_mask=None):
+            pos_w, yaw_w = gl.transform_agents_to_world(x[..., :2], x[..., 3:4], data_batch["world_from_agent"])
+            B = pos_w.size(0)
+            perdida = torch.zeros(B, pos_w.size(1), device=pos_w.device, dtype=pos_w.dtype)
+            a = self.adversario
+            if 0 <= a < B:
+                discos, r = self._discos(pos_w, yaw_w[..., 0], data_batch["extent"])
+                otros = [k for k in range(B) if k not in (a, self.ego)]
+                if otros:
+                    da = discos[a].unsqueeze(0)                                    # (1,N,T,D,2)
+                    do = discos[otros].detach()                                    # (K,N,T,D,2)
+                    dist = torch.cdist(da.reshape(-1, self.discos, 2).expand(len(otros), -1, -1, -1).reshape(-1, self.discos, 2),
+                                       do.reshape(-1, self.discos, 2)).amin(dim=(-1, -2))
+                    dist = dist.view(len(otros), pos_w.size(1), pos_w.size(2))     # (K, N, T)
+                    umbral = (r[a] + r[otros] + self.margen).view(-1, 1, 1)
+                    validos = torch.isfinite(dist)
+                    invasion = torch.where(validos, torch.relu(umbral - dist), torch.zeros_like(dist))
+                    perdida[a] = invasion.sum(dim=(0, 2))
+            return perdida[agt_mask] if agt_mask is not None else perdida
+    gl.GUIDANCE_FUNC_MAP["evita_otros"] = EvitaOtrosLoss
     # scene_editor crea una metrica por cada guiado y falla con nombres que no conoce
     from tbsim.utils import guidance_metrics as gmet
     gmet.GUIDANCE_NAME_TO_METRICS.setdefault("intercepta_ego", {})
+    gmet.GUIDANCE_NAME_TO_METRICS.setdefault("evita_otros", {})
 
     def heuristica_intercepta(sim_scene, dt, **kw):
         nombres = [a.name for a in sim_scene.agents]
@@ -255,6 +301,13 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                 "params": {"ego": nombres.index("ego"), "adversario": estado["adversario"]},
                 "agents": None}
     seu.HEURISTIC_FUNC["intercepta_ego"] = heuristica_intercepta
+
+    def heuristica_evita(sim_scene, dt, **kw):
+        cfg = heuristica_intercepta(sim_scene, dt)
+        if cfg is not None:
+            cfg["name"] = "evita_otros"
+        return cfg
+    seu.HEURISTIC_FUNC["evita_otros"] = heuristica_evita
     return estado
 
 
@@ -292,6 +345,8 @@ def main():
                          "guiado de colision apunta solo al ego; sin limite de 100 escenas")
     ap.add_argument("--w_ego", type=float, default=1.0,
                     help="peso del guiado 'intercepta_ego' (solo con --objetivo_ego)")
+    ap.add_argument("--w_evita", type=float, default=1.0,
+                    help="peso del guiado 'evita_otros': el adversario esquiva a todos menos al ego (0 = sin el)")
     ap.add_argument("--semilla", type=int, default=0,
                     help="semilla del sorteo del adversario (otra semilla = otro adversario en la escena)")
     ap.add_argument("--sin_parche_guiado", action="store_true",
@@ -375,6 +430,9 @@ def main():
             # --w_collision y --w_offroad
             self.edits.heuristic_config.append({"name": "intercepta_ego", "weight": args.w_ego,
                                                 "params": {}, "agents": None})
+            if args.w_evita > 0:
+                self.edits.heuristic_config.append({"name": "evita_otros", "weight": args.w_evita,
+                                                    "params": {}, "agents": None})
         self.lock(bloqueada)
         print(f"[evaluacion] rutas sustituidas en: {', '.join(cambios)}")
         print(f"[evaluacion] optimizador de guiado: {dict(self.guidance_optimization_params)}")
