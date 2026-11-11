@@ -127,6 +127,72 @@ def parchear_guiado_parcial():
     gl.PartialPerturbationGuidance.perturb = perturb
 
 
+def parchear_objetivo_ego():
+    """Accidentes CON EL EGO sin que el ego "sepa" nada (--objetivo_ego).
+
+    - Agentes controlados: los K mas cercanos al ego, SIN el ego (CCDiff los tomaba de
+      un archivo fijo del paper que solo cubre 100 escenas). El ego no se controla:
+      reproduce su trayectoria real de nuScenes, no anticipa el accidente.
+    - Guiado de colision: AgentCollisionLoss solo cuenta los choques CON EL EGO
+      (excluded_agents = todos los demas; los choques entre ellos no se guian).
+    En el log queda "[evaluacion] ego: <indice>" de cada escena para analizar_choques.py.
+    """
+    import joblib
+    import numpy as np
+    from tbsim.envs import env_trajdata as et
+    from tbsim.utils import scene_edit_utils as seu
+
+    estado = {"env": None}
+    reset_original = et.EnvUnifiedSimulation.reset
+
+    def reset(self, *a, **k):
+        res = reset_original(self, *a, **k)
+        estado["env"] = self
+        return res
+    et.EnvUnifiedSimulation.reset = reset
+
+    class Identidad(dict):
+        def __getitem__(self, clave):
+            return clave
+
+        def __len__(self):
+            return 10 ** 6
+
+    class CercanosAlEgo(dict):
+        def __getitem__(self, clave):
+            env = estado["env"]
+            nombres = list(env.current_agent_names)
+            if "ego" not in nombres:
+                print("[evaluacion] AVISO: escena sin agente 'ego'; se controlan los primeros")
+                return list(range(len(nombres)))
+            ie = nombres.index("ego")
+            c = np.asarray(env.get_observation()["agents"]["centroid"], dtype=float)
+            d = np.linalg.norm(c - c[ie], axis=-1)
+            orden = [int(i) for i in np.argsort(d) if i != ie and np.isfinite(d[i])]
+            print(f"[evaluacion] ego: {ie}")
+            return orden
+    load_original = joblib.load
+
+    def load(f, *a, **k):
+        nombre = str(f)
+        if nombre.endswith("10_control_idx_test_init.pkl"):
+            return CercanosAlEgo()
+        if nombre.endswith("0_scene_idx.pkl"):
+            return Identidad()
+        return load_original(f, *a, **k)
+    joblib.load = load
+
+    colision_original = seu.HEURISTIC_FUNC["agent_collision"]
+
+    def colision_con_ego(sim_scene, dt, num_disks, buffer_dist, decay_rate, excluded_agents, **kw):
+        cfg = colision_original(sim_scene, dt, num_disks, buffer_dist, decay_rate, excluded_agents, **kw)
+        nombres = [a.name for a in sim_scene.agents]
+        if "ego" in nombres:
+            cfg["params"]["excluded_agents"] = [i for i, n in enumerate(nombres) if n != "ego"]
+        return cfg
+    seu.HEURISTIC_FUNC["agent_collision"] = colision_con_ego
+
+
 def main():
     ap = argparse.ArgumentParser(description="Evaluacion de CCDiff con scene_editor (sin BeamNG)")
     ap.add_argument("--ckpt_dir", default="/workspace/entrenados/ccdiff_5413/run0",
@@ -156,6 +222,9 @@ def main():
                          "empujon depende del lr, NO de w_collision (el peso solo reparte entre perdidas)")
     ap.add_argument("--guia_pasos", type=int, default=None,
                     help="pasos de gradiente del guiado en cada paso de difusion (CCDiff: 1)")
+    ap.add_argument("--objetivo_ego", action="store_true",
+                    help="accidentes con el ego: se controlan los agentes mas cercanos (sin el ego) y el "
+                         "guiado de colision apunta solo al ego; sin limite de 100 escenas")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
@@ -180,6 +249,8 @@ def main():
         nombre += f"_ctrl{args.controlables}"
     if args.sin_parche_guiado:
         nombre += "_sinparche"
+    if args.objetivo_ego:
+        nombre += "_ego"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
     salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
@@ -205,7 +276,7 @@ def main():
         n_max = len(joblib.load(str(le.CCDIFF / "data" / "0_scene_idx.pkl")))
     except Exception:  # noqa: BLE001
         n_max = 100
-    fuera = [i for i in escenas if i >= n_max]
+    fuera = [] if args.objetivo_ego else [i for i in escenas if i >= n_max]
     if fuera:
         print(f"[evaluacion] AVISO: CCDiff solo tiene agentes controlables para {n_max} escenas; "
               f"se quitan los indices {fuera[0]}..{fuera[-1]}")
@@ -245,6 +316,9 @@ def main():
         sys.exit(f"No hay ningun checkpoint que contenga '{args.ckpt}' en {args.ckpt_dir}")
 
     le.parchear_deepcopy_feature_extractor()
+    if args.objetivo_ego:
+        parchear_objetivo_ego()
+        print("[evaluacion] objetivo: accidentes con el ego (ego sin controlar, guiado solo hacia el ego)")
     if not args.sin_parche_guiado:
         parchear_guiado_parcial()
         print("[evaluacion] parche de guiado parcial aplicado")

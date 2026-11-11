@@ -15,7 +15,8 @@ tbsim sigue sin fisica (los coches se atraviesan) y los choques siguientes no so
 reales. Si ese primer choque no es valido, la escena entera se descarta.
 
 Escena candidata = choque con algun agente controlado, que no exista ya en el primer
-paso, con los dos coches sobre la calzada, con velocidad relativa >= --v_min m/s y
+paso, con los dos coches sobre la calzada, con velocidad relativa >= --v_min m/s,
+(con --solo_ego) con el ego implicado, sin controlar y golpeado de frente o de lado, y
 PLAUSIBLE hasta el impacto: no antes de T_MIN, sin coches pegados al inicio, sin giros,
 aceleraciones o derrapes imposibles, entre turismos y sin agentes que aparezcan o
 desaparezcan cerca antes del impacto (umbrales al principio del archivo;
@@ -50,6 +51,7 @@ def leer_controlados(log_path):
     """
     res, actual, pendiente, escena = {}, None, None, None
     indice = {}  # posicion de cada lote (1 escena) en eval_scenes, para --escenas_idx
+    ego_pendiente = None
     patron_lista = re.compile(r"\[([0-9,\s]*)\]")
     for linea in Path(log_path).read_text(errors="replace").splitlines():
         if linea.startswith("[evaluacion] salida:"):
@@ -58,6 +60,8 @@ def leer_controlados(log_path):
             indice[actual] = 0
         elif linea.startswith("no valid scenes in this batch") and actual is not None:
             indice[actual] += 1
+        elif linea.startswith("[evaluacion] ego:") and actual is not None:
+            ego_pendiente = int(linea.split(":")[1])
         elif linea.startswith("set guidance dim:"):
             m = patron_lista.search(linea)
             pendiente = [int(x) for x in m.group(1).split(",") if x.strip()] if m else None
@@ -65,9 +69,10 @@ def leer_controlados(log_path):
             escena = linea.strip()[2:-2]
         elif escena and re.fullmatch(r"\[\d+\]", linea.strip()):
             if actual is not None:
-                res[actual][(escena, int(linea.strip()[1:-1]))] = dict(ctrl=pendiente, idx=indice[actual])
+                res[actual][(escena, int(linea.strip()[1:-1]))] = dict(ctrl=pendiente, idx=indice[actual],
+                                                                        ego=ego_pendiente)
                 indice[actual] += 1
-            escena, pendiente = None, None
+            escena, pendiente, ego_pendiente = None, None, None
     return res
 
 
@@ -138,7 +143,8 @@ ACEL_MAX = 5.0        # m/s^2: aceleracion sostenida (media de 0,3 s); un turism
 FRENO_MAX = 9.5       # m/s^2: frenada sostenida; una frenada de emergencia en seco llega a ~9-10
 DERRAPE_MAX = 35.0    # grados entre la direccion de la velocidad y el morro (con v >= 3 m/s)
 LARGO_MAX = 7.0       # m: mas largo = autobus/camion (BeamNG usa turismos)
-T_MIN = 1.0           # s: un choque antes de esto no tiene fase previa (coches pegados al inicio)
+T_MIN = 2.0           # s: fase previa minima. Los clips de anticipacion (AoTA, DAD) duran 5 s con
+                      # el choque entre los 2 y los 4,5 s: hacen falta >= 2 s antes del impacto
 RADIO_POP = 20.0      # m: un agente que aparece o desaparece (anotacion de nuScenes que empieza o
                       # acaba) a esta distancia de los implicados antes del choque invalida la escena
 HUECO_MIN = 2.0       # m: separacion minima entre las cajas al inicio
@@ -284,7 +290,7 @@ def choques_escena(g, controlados):
     return eventos, n, T
 
 
-def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
+def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False, solo_ego=False):
     import h5py
     h5 = carpeta / "scene_edit_eval" / "data.hdf5"
     if not h5.is_file():
@@ -299,6 +305,11 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
             n_escenas += 1
             info = ctrl_por_escena.get((escena, frame)) or {}
             ctrl, idx = info.get("ctrl"), info.get("idx")
+            # Indice del ego: lo escribe --objetivo_ego en el log. En ejecuciones anteriores
+            # no esta; en nuScenes/trajdata el ego es el agente 0 (mide 4,08 x 1,73 m).
+            ego = info.get("ego")
+            if ego is None:
+                ego = 0
             if ctrl is None:
                 sin_ctrl += 1
                 ctrl = []
@@ -323,8 +334,27 @@ def analizar_ejecucion(carpeta, ctrl_por_escena, calzada, v_min, todos=False):
             # El accidente de la escena es el PRIMER choque con un agente controlado: tras
             # el, tbsim sigue sin fisica (los coches se atraviesan) y lo demas no es real.
             # Si ese primero no vale, la escena se descarta (no se busca otro mas tarde).
+            for e in eventos:
+                e["con_ego"] = ego in (e["a"], e["b"])
+                if e["con_ego"]:
+                    otro_es_a = e["b"] == ego
+                    e["impacto_ego"] = e["impacto_b"] if otro_es_a else e["impacto_a"]
+                    e["ego_controlado"] = ego in set(ctrl)
+                    if solo_ego:
+                        extra = []
+                        if e["ego_controlado"]:
+                            extra.append("ego_controlado")  # el ego "sabria" el futuro
+                        if e["impacto_ego"] == "REAR":
+                            extra.append("ego_golpeado_por_detras")  # no se ve en la camara frontal
+                        if extra:
+                            e["aceptable"] = False
+                            e["razones"] = " ".join(filter(None, [e["razones"]] + extra))
+                elif solo_ego:
+                    e["aceptable"] = False
+                    e["razones"] = " ".join(filter(None, [e["razones"], "sin_ego"]))
             relevantes = sorted((e for e in eventos if not e["ya_al_inicio"]
-                                 and (e["controlado_a"] or e["controlado_b"])), key=lambda e: e["t"])
+                                 and (e["controlado_a"] or e["controlado_b"] or e["con_ego"])),
+                                key=lambda e: e["t"])
             if not relevantes:
                 continue
             t1 = relevantes[0]["t"]
@@ -355,6 +385,9 @@ def main():
     ap.add_argument("--sin_mapa", action="store_true", help="no comprobar si los coches estaban en la calzada")
     ap.add_argument("--v_min", type=float, default=2.0,
                     help="velocidad relativa minima (m/s) para considerar un choque como accidente")
+    ap.add_argument("--solo_ego", action="store_true",
+                    help="solo accidentes del ego: el primer choque debe ser con el ego, el ego no puede estar "
+                         "controlado por CCDiff y el golpe no puede ser por detras (no se ve en la camara frontal)")
     ap.add_argument("--sin_filtro", action="store_true",
                     help="no exigir plausibilidad (ver columnas motivos/plausible en choques.csv)")
     args = ap.parse_args()
@@ -375,7 +408,8 @@ def main():
     todas_filas, todas_cand, todas_esc = [], [], []
     print(f"\n{'ejecucion':<40} {'escenas':>7} {'con choque':>10} {'choque ctrl':>11} {'candidatas':>10}")
     for carpeta in sorted(p for p in grupo.iterdir() if p.is_dir()):
-        r = analizar_ejecucion(carpeta, ctrl.get(carpeta.name, {}), calzada, args.v_min, args.sin_filtro)
+        r = analizar_ejecucion(carpeta, ctrl.get(carpeta.name, {}), calzada, args.v_min, args.sin_filtro,
+                               args.solo_ego)
         if r is None:
             continue
         escenas_choque = {(e["escena"], e["frame_inicio"]) for e in r["filas"] if not e["ya_al_inicio"]}
@@ -408,7 +442,7 @@ def main():
     campos = ["ejecucion", "escena", "idx", "frame_inicio", "mapa", "n_agentes", "controlados", "a", "b",
               "controlado_a", "controlado_b", "t", "t_s", "ya_al_inicio", "v_a", "v_b", "v_rel",
               "impacto_a", "impacto_b", "calzada_a", "calzada_b", "plausible", "motivos", "hueco_inicial",
-              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "freno_max", "derrape_max", "pops_cerca", "aceptable", "razones",
+              "largo_a", "largo_b", "yaw_rate_max", "acel_max", "freno_max", "derrape_max", "pops_cerca", "con_ego", "impacto_ego", "ego_controlado", "aceptable", "razones",
               "primero", "candidato", "xa", "ya", "xb", "yb"]
     with open(grupo / "choques.csv", "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=campos, extrasaction="ignore")

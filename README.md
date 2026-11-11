@@ -187,3 +187,29 @@ Ahora `analizar_choques.py` solo da por candidato un choque que, hasta el impact
 **Coches que aparecen o desaparecen (11/11).** nuScenes solo anota los vehículos cercanos al coche que graba, así que los que reproducen el registro aparecen y desaparecen a mitad de escena. Si eso ocurre a menos de 20 m de los implicados antes del choque, la escena no se puede reproducir con coherencia en BeamNG. Se descarta con el motivo `aparece_desaparece_cerca`, y la columna `pops_cerca` indica qué agente y cuándo (por ejemplo `7-@2.5s` si desaparece y `+` si aparece). En los GIF, un agente que deja de existir queda como contorno discontinuo con una X en su última posición.
 
 El motivo de cada descarte queda en la columna `motivos` de `choques.csv`, y los umbrales están al principio del archivo. `--sin_filtro` vuelve al criterio anterior. Lo que pasa después del impacto no se filtra, porque en BeamNG lo resuelve la física; por eso los GIF se cortan 2 s después (`--completo` para verlos enteros).
+
+### Accidentes con el ego (11/11)
+
+El objetivo es un banco de accidentes para generar clips de anticipación en BeamNG y World Dreamer, como en el paper de referencia, con el ego implicado en la mayoría de casos. El paper también genera por adelantado (300 vídeos con OSM, SUMO, UniAD y World Dreamer). AoTA y DAD usan clips de 5 s con el accidente entre los 2 y los 4,5 s.
+
+**Generación** (`lanzar_evaluacion.py --objetivo_ego`):
+- Se controlan los K agentes más cercanos al ego, **sin el ego**. Ya no se usa el archivo fijo del paper, así que desaparece el límite de 100 escenas.
+- El ego reproduce su trayectoria real de nuScenes, así que no «sabe» que va a haber un accidente. Su comportamiento no lleva información del futuro y el clip sirve para anticipación.
+- El guiado de colisión solo cuenta los choques **con el ego** (`excluded_agents` = todos los demás).
+- El log guarda `[evaluacion] ego: <índice>` de cada escena.
+
+```bash
+GRUPO=ego_val ESCENAS=150 CKPTS="iter50000.ckpt" WCOLS="-50" LRS="0.3" \
+  EXTRA="--sin_video --controlables 5 --objetivo_ego" sbatch --time=12:00:00 evaluar.sh
+```
+
+**Filtro** (`analizar_choques.py --solo_ego`). El primer choque de la escena tiene que:
+- ser con el ego;
+- ocurrir con el ego sin controlar;
+- golpear al ego de frente o de lado, porque si le golpean por detrás no se ve en la cámara frontal.
+
+Además, la fase previa mínima pasa a 2 s (`T_MIN`), para poder cortar un clip de 5 s con el choque entre los 2 y los 4,5 s. En ejecuciones sin `--objetivo_ego` se supone que el ego es el agente 0, que en trajdata mide 4,08 × 1,73 m.
+
+```bash
+GRUPO=ego_val JOBS="<id>" EXTRA="--solo_ego" sbatch analizar.sh
+```
