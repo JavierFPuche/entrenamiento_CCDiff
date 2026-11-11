@@ -197,6 +197,19 @@ def main():
         escenas = [int(x) for x in args.escenas_idx.split(",") if x.strip()]
     else:
         escenas = list(range(args.escenas))
+    # scene_editor.py toma los agentes controlables de un archivo fijo del paper
+    # (data/0_scene_idx.pkl + data/10_control_idx_test_init.pkl) que solo cubre las
+    # primeras 100 escenas de validacion: con mas, falla con IndexError en la 101.
+    try:
+        import joblib
+        n_max = len(joblib.load(str(le.CCDIFF / "data" / "0_scene_idx.pkl")))
+    except Exception:  # noqa: BLE001
+        n_max = 100
+    fuera = [i for i in escenas if i >= n_max]
+    if fuera:
+        print(f"[evaluacion] AVISO: CCDiff solo tiene agentes controlables para {n_max} escenas; "
+              f"se quitan los indices {fuera[0]}..{fuera[-1]}")
+        escenas = [i for i in escenas if i < n_max]
 
     def init(self, *a, **k):
         init_original(self, *a, **k)
