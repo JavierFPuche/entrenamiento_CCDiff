@@ -133,8 +133,10 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
     - El ego NO se controla: reproduce su trayectoria real de nuScenes (no anticipa nada).
     - Se elige UN adversario por escena: un agente en movimiento, a menos de
       `radio_busqueda` m y dentro de +-`sector_grados` del frente del ego (no por detras:
-      ese golpe no se veria en la camara frontal). Se sortea entre los `n_candidatos`
-      mas cercanos (semilla fija por escena) para dar variedad.
+      ese golpe no se veria en la camara frontal), de <= 7 m, con >= 2 m de hueco con
+      cualquier otro coche y que a velocidad constante ya se acerque al ego en la ventana
+      del clip (puntuacion = distancia minima + penalizacion si no cae en 2-5 s). Se sortea
+      entre los `n_candidatos` mejor puntuados (semilla fija por escena) para dar variedad.
     - Agentes controlados: el adversario primero y despues los mas cercanos al ego
       (sin el ego). CCDiff los tomaba de un archivo fijo que solo cubre 100 escenas.
     - Guiado nuevo "intercepta_ego" (largo alcance): solo para el adversario, minimiza la
@@ -153,6 +155,42 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
     from tbsim.utils import guidance_loss as gl
 
     estado = {"env": None, "ego": None, "adversario": None}
+    T_ALCANCE, PUNTOS_MAX = 6.0, 20.0
+
+    def holgura_inicial(c, yaw, ext, ie):
+        """Hueco minimo (m) entre cada agente y cualquier otro que no sea el ego, con cajas
+        orientadas. Un adversario pegado a otro coche choca con el antes de 2 s
+        (escena 0093 del 11/11: el adversario empezaba rozando un autobus)."""
+        n = len(c)
+        try:
+            from shapely.geometry import Polygon as P
+        except ImportError:
+            dd = np.linalg.norm(c[:, None] - c[None], axis=-1) - ext[:, None, 0] / 2 - ext[None, :, 0] / 2
+            np.fill_diagonal(dd, np.inf)
+            dd[:, ie] = np.inf
+            return np.where(np.isfinite(c).all(-1), dd.min(1), -1.0)
+        polis = []
+        for i in range(n):
+            if not np.isfinite(c[i]).all() or (c[i] == 0).all():
+                polis.append(None)
+                continue
+            l, w = ext[i, 0] / 2, ext[i, 1] / 2
+            co, si = np.cos(yaw[i]), np.sin(yaw[i])
+            esq = [(c[i, 0] + co * x - si * y, c[i, 1] + si * x + co * y)
+                   for x, y in ((l, w), (l, -w), (-l, -w), (-l, w))]
+            polis.append(P(esq))
+        h = np.full(n, np.inf)
+        for i in range(n):
+            if polis[i] is None:
+                h[i] = -1.0
+                continue
+            for j in range(n):
+                if j in (i, ie) or polis[j] is None:
+                    continue
+                if np.linalg.norm(c[i] - c[j]) < 15.0:
+                    h[i] = min(h[i], polis[i].distance(polis[j]))
+        return h
+
     reset_original = et.EnvUnifiedSimulation.reset
 
     def reset(self, *a, **k):
@@ -181,19 +219,44 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
             c = np.asarray(obs["centroid"], dtype=float)
             yaw = np.asarray(obs["yaw"], dtype=float).reshape(-1)
             vel = np.abs(np.asarray(obs.get("curr_speed", np.ones(len(c))), dtype=float).reshape(-1))
+            ext = np.asarray(obs.get("extent", np.tile([4.5, 1.9, 1.5], (len(c), 1))), dtype=float)
             d = np.linalg.norm(c - c[ie], axis=-1)
             rumbo = np.degrees(np.arctan2(c[:, 1] - c[ie, 1], c[:, 0] - c[ie, 0]) - yaw[ie])
             rumbo = (rumbo + 180) % 360 - 180
             orden = [int(i) for i in np.argsort(d) if i != ie and np.isfinite(d[i])]
-            validos = [i for i in orden if d[i] <= radio_busqueda and abs(rumbo[i]) <= sector_grados
-                       and vel[i] > 1.0]
+            # Alcance a velocidad constante: distancia minima con el ego en los proximos
+            # T_ALCANCE s y en que instante. Un adversario que ya "va hacia" el ego necesita
+            # poco empujon (el guiado solo da lr*signo por paso) y choca dentro de la ventana.
+            ts = np.arange(0.0, T_ALCANCE + 1e-6, 0.1)
+            v = vel[:, None] * np.stack([np.cos(yaw), np.sin(yaw)], -1)                    # (N, 2)
+            rel = (c - c[ie])[:, None, :] + (v - v[ie])[:, None, :] * ts[None, :, None]    # (N, T, 2)
+            dist_t = np.linalg.norm(rel, axis=-1)
+            k = np.argmin(dist_t, axis=1)
+            dmin_cv, tmin_cv = dist_t[np.arange(len(c)), k], ts[k]
+            # puntuacion: cerca a velocidad constante y con la maxima aproximacion en la
+            # ventana del clip (2-5 s); fuera de ella se penaliza
+            puntos = dmin_cv + 3.0 * np.maximum(0, 2.0 - tmin_cv) + 3.0 * np.maximum(0, tmin_cv - 5.0)
+            hueco = holgura_inicial(c, yaw, ext, ie)
+            razones = {}
+
+            def apto(i):
+                for ok, r in ((d[i] <= radio_busqueda, "lejos"), (abs(rumbo[i]) <= sector_grados, "detras"),
+                              (vel[i] > 1.0, "parado"), (ext[i, 0] <= 7.0, "grande"),
+                              (hueco[i] >= 2.0, "pegado"), (puntos[i] <= PUNTOS_MAX, "inalcanzable")):
+                    if not ok:
+                        razones[r] = razones.get(r, 0) + 1
+                        return False
+                return True
+            validos = sorted((i for i in orden if apto(i)), key=lambda i: puntos[i])
             adv = None
             if validos:
                 rng = np.random.default_rng(semilla * 100003 + int(clave))
                 adv = int(rng.choice(validos[:n_candidatos]))
                 orden = [adv] + [i for i in orden if i != adv]
             estado["ego"], estado["adversario"] = ie, adv
-            print(f"[evaluacion] ego: {ie} adversario: {adv if adv is not None else '-'}")
+            extra = (f" (d={d[adv]:.0f} m, dmin_cv={dmin_cv[adv]:.1f} m en t={tmin_cv[adv]:.1f} s, "
+                     f"{len(validos)} aptos)" if adv is not None else f" (descartes: {razones})")
+            print(f"[evaluacion] ego: {ie} adversario: {adv if adv is not None else '-'}{extra}")
             return orden
 
     load_original = joblib.load
@@ -375,6 +438,8 @@ def main():
         nombre += "_sinparche"
     if args.objetivo_ego:
         nombre += "_ego" + (f"{txt(args.w_ego)}" if args.w_ego != 1.0 else "")
+        if args.w_evita != 1.0:
+            nombre += f"_ev{txt(args.w_evita)}"
         if args.semilla:
             nombre += f"_s{args.semilla}"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
