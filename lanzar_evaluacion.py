@@ -243,6 +243,9 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
             perdida = perdida * solo_adv
             return perdida[agt_mask] if agt_mask is not None else perdida
     gl.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
+    # scene_editor crea una metrica por cada guiado y falla con nombres que no conoce
+    from tbsim.utils import guidance_metrics as gmet
+    gmet.GUIDANCE_NAME_TO_METRICS.setdefault("intercepta_ego", {})
 
     def heuristica_intercepta(sim_scene, dt, **kw):
         nombres = [a.name for a in sim_scene.agents]

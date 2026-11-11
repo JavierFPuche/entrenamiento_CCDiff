@@ -438,7 +438,11 @@ def main():
         todas_esc += r["escenas"]
 
     if not todas_filas:
-        sys.exit(f"No hay choques (o no hay data.hdf5) bajo {grupo}")
+        # no es un error (y asi no rompe la cadena con dibujar.sh): se dejan los JSON vacios
+        print(f"\nNo hay choques (o no hay data.hdf5) bajo {grupo}")
+        (grupo / "candidatas.json").write_text("[]")
+        (grupo / "escenas.json").write_text("[]")
+        return
 
     campos = ["ejecucion", "escena", "idx", "frame_inicio", "mapa", "n_agentes", "controlados", "a", "b",
               "controlado_a", "controlado_b", "t", "t_s", "ya_al_inicio", "v_a", "v_b", "v_rel",
