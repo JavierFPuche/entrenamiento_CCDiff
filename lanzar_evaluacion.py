@@ -35,6 +35,9 @@ REGISTRO = "trajdata_nusc_ccdiff"
 
 # Veces que el guiado ha movido de verdad la trayectoria (para comprobarlo en el log)
 CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0, "grad_no_finito": 0}
+# Pruebas de que los guiados nuevos se ejecutan (job 5511/5512: w_ego 1 y 3 daban
+# metricas identicas y no habia forma de saber si intercepta_ego llegaba a calcularse)
+CONTADOR_EGO = {"intercepta": 0, "evita": 0, "dmin_suma": 0.0, "dmin_n": 0}
 
 
 def parchear_guiado_parcial():
@@ -155,7 +158,7 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
     from tbsim.utils import guidance_loss as gl
 
     estado = {"env": None, "ego": None, "adversario": None}
-    T_ALCANCE, PUNTOS_MAX = 6.0, 20.0
+    T_ALCANCE, PUNTOS_MAX, ACERCA_MIN = 6.0, 20.0, 2.0
 
     def holgura_inicial(c, yaw, ext, ie):
         """Hueco minimo (m) entre cada agente y cualquier otro que no sea el ego, con cajas
@@ -236,13 +239,18 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
             # puntuacion: cerca a velocidad constante y con la maxima aproximacion en la
             # ventana del clip (2-5 s); fuera de ella se penaliza
             puntos = dmin_cv + 3.0 * np.maximum(0, 2.0 - tmin_cv) + 3.0 * np.maximum(0, tmin_cv - 5.0)
+            # Tiene que ACERCARSE al ego: en el job 5511, 6 de 16 adversarios se alejaban
+            # (minimo en t=0,0-0,4 s, dmin_cv ~ d) y la penalizacion maxima de 6 m no los quitaba
+            acerca = d - dmin_cv
             hueco = holgura_inicial(c, yaw, ext, ie)
             razones = {}
 
             def apto(i):
                 for ok, r in ((d[i] <= radio_busqueda, "lejos"), (abs(rumbo[i]) <= sector_grados, "detras"),
                               (vel[i] > 1.0, "parado"), (ext[i, 0] <= 7.0, "grande"),
-                              (hueco[i] >= 2.0, "pegado"), (puntos[i] <= PUNTOS_MAX, "inalcanzable")):
+                              (hueco[i] >= 2.0, "pegado"),
+                              (acerca[i] >= ACERCA_MIN and tmin_cv[i] >= 1.0, "se_aleja"),
+                              (puntos[i] <= PUNTOS_MAX, "inalcanzable")):
                     if not ok:
                         razones[r] = razones.get(r, 0) + 1
                         return False
@@ -298,14 +306,20 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
         def forward(self, x, data_batch, agt_mask=None):
             pos_w, _ = gl.transform_agents_to_world(x[..., :2], x[..., 3:4], data_batch["world_from_agent"])
             B = pos_w.size(0)
-            ego_traj = pos_w[self.ego].detach()                              # (N, T, 2)
-            dist = torch.norm(pos_w - ego_traj.unsqueeze(0), dim=-1)          # (B, N, T)
-            dmin = dist.min(dim=-1).values
-            perdida = torch.relu(dmin - self.radio)                           # (B, N)
-            solo_adv = torch.zeros(B, 1, device=perdida.device, dtype=perdida.dtype)
-            if 0 <= self.adversario < B:
-                solo_adv[self.adversario] = 1.0
-            perdida = perdida * solo_adv
+            perdida = torch.zeros(B, pos_w.size(1), device=pos_w.device, dtype=pos_w.dtype)
+            a = self.adversario
+            if 0 <= a < B and a != self.ego:
+                # Solo la fila del adversario. Antes se calculaba torch.norm para TODOS los
+                # agentes y la fila del ego (distancia 0) daba gradiente NaN (0/0) aunque
+                # luego se multiplicara por 0. Con eps la raiz es derivable en 0.
+                ego_traj = pos_w[self.ego].detach()                          # (N, T, 2)
+                dif = pos_w[a] - ego_traj
+                dist = torch.sqrt((dif ** 2).sum(-1) + 1e-6)                 # (N, T)
+                dmin = dist.min(dim=-1).values                               # (N,)
+                perdida[a] = torch.relu(dmin - self.radio)
+                CONTADOR_EGO["intercepta"] += 1
+                CONTADOR_EGO["dmin_suma"] += float(dmin.detach().mean())
+                CONTADOR_EGO["dmin_n"] += 1
             return perdida[agt_mask] if agt_mask is not None else perdida
     gl.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
 
@@ -349,8 +363,23 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                     validos = torch.isfinite(dist)
                     invasion = torch.where(validos, torch.relu(umbral - dist), torch.zeros_like(dist))
                     perdida[a] = invasion.sum(dim=(0, 2))
+                    CONTADOR_EGO["evita"] += 1
             return perdida[agt_mask] if agt_mask is not None else perdida
     gl.GUIDANCE_FUNC_MAP["evita_otros"] = EvitaOtrosLoss
+    # El guiado lo calcula ccdiff.utils.guidance_loss (ver parchear_guiado_parcial). Si ese
+    # modulo tiene SU PROPIO diccionario, registrar solo en el de tbsim no basta.
+    try:
+        from ccdiff.utils import guidance_loss as gl_cc
+        mapas = [("tbsim", gl.GUIDANCE_FUNC_MAP)]
+        if gl_cc.GUIDANCE_FUNC_MAP is not gl.GUIDANCE_FUNC_MAP:
+            gl_cc.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
+            gl_cc.GUIDANCE_FUNC_MAP["evita_otros"] = EvitaOtrosLoss
+            mapas.append(("ccdiff", gl_cc.GUIDANCE_FUNC_MAP))
+            if getattr(gl_cc, "transform_agents_to_world", None) is None:
+                print("[evaluacion] AVISO: ccdiff.utils.guidance_loss no tiene transform_agents_to_world")
+        print(f"[evaluacion] guiados del ego registrados en: {', '.join(n for n, _ in mapas)}")
+    except ImportError:
+        print("[evaluacion] guiados del ego registrados solo en tbsim (no se pudo importar ccdiff.utils)")
     # scene_editor crea una metrica por cada guiado y falla con nombres que no conoce
     from tbsim.utils import guidance_metrics as gmet
     gmet.GUIDANCE_NAME_TO_METRICS.setdefault("intercepta_ego", {})
@@ -542,6 +571,13 @@ def main():
             c = CONTADOR_GUIADO
             print(f"[evaluacion] pasos de guiado: {c['llamadas']}, con cambio en la trayectoria: {c['con_cambio']}, "
                   f"elementos de gradiente NaN/inf anulados: {c['grad_no_finito']}")
+        if args.objetivo_ego:
+            e = CONTADOR_EGO
+            media = e["dmin_suma"] / e["dmin_n"] if e["dmin_n"] else float("nan")
+            print(f"[evaluacion] guiados del ego: intercepta_ego calculado {e['intercepta']} veces "
+                  f"(dmin medio adversario-ego en el plan: {media:.1f} m), evita_otros {e['evita']} veces")
+            if e["intercepta"] == 0:
+                print("[evaluacion] AVISO: intercepta_ego NUNCA se ha calculado: el guiado hacia el ego no actua")
 
 
 if __name__ == "__main__":
