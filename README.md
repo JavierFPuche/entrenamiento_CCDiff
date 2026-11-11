@@ -195,12 +195,14 @@ El objetivo es un banco de accidentes para generar clips de anticipación en Bea
 **Generación** (`lanzar_evaluacion.py --objetivo_ego`):
 - Se controlan los K agentes más cercanos al ego, **sin el ego**. Ya no se usa el archivo fijo del paper, así que desaparece el límite de 100 escenas.
 - El ego reproduce su trayectoria real de nuScenes, así que no «sabe» que va a haber un accidente. Su comportamiento no lleva información del futuro y el clip sirve para anticipación.
-- El guiado de colisión solo cuenta los choques **con el ego** (`excluded_agents` = todos los demás).
-- El log guarda `[evaluacion] ego: <índice>` de cada escena.
+- Se elige **un adversario** por escena: un agente en movimiento, a menos de 60 m y delante o a los lados del ego (±100°), sorteado entre los 3 más cercanos. `--semilla` cambia el sorteo.
+- **Guiado nuevo, `intercepta_ego`** (peso `--w_ego`, 1 por defecto): solo para el adversario, minimiza la distancia mínima entre su plan y el del ego en el horizonte de 5,2 s. La pérdida de colisión original de CCDiff solo actúa cuando dos coches ya están casi tocándose (a menos de su radio más 0,2 m), así que por sí sola no lleva a nadie hacia el ego. La prueba 11/11 dio `guide_agent_collision = 0` y el guiado solo cambió la trayectoria en 139 de 5.940 pasos.
+- La pérdida de colisión original solo cuenta los choques **con el ego** (`excluded_agents` = todos los demás) y cierra el último tramo.
+- El log guarda `[evaluacion] ego: <i> adversario: <j>` de cada escena.
 
 ```bash
 GRUPO=ego_val ESCENAS=150 CKPTS="iter50000.ckpt" WCOLS="-50" LRS="0.3" \
-  EXTRA="--sin_video --controlables 5 --objetivo_ego" sbatch --time=12:00:00 evaluar.sh
+  EXTRA="--sin_video --controlables 1 --objetivo_ego" sbatch --time=12:00:00 evaluar.sh
 ```
 
 **Filtro** (`analizar_choques.py --solo_ego`). El primer choque de la escena tiene que:

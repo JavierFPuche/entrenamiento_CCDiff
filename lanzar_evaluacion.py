@@ -127,22 +127,30 @@ def parchear_guiado_parcial():
     gl.PartialPerturbationGuidance.perturb = perturb
 
 
-def parchear_objetivo_ego():
+def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n_candidatos=3):
     """Accidentes CON EL EGO sin que el ego "sepa" nada (--objetivo_ego).
 
-    - Agentes controlados: los K mas cercanos al ego, SIN el ego (CCDiff los tomaba de
-      un archivo fijo del paper que solo cubre 100 escenas). El ego no se controla:
-      reproduce su trayectoria real de nuScenes, no anticipa el accidente.
-    - Guiado de colision: AgentCollisionLoss solo cuenta los choques CON EL EGO
-      (excluded_agents = todos los demas; los choques entre ellos no se guian).
-    En el log queda "[evaluacion] ego: <indice>" de cada escena para analizar_choques.py.
+    - El ego NO se controla: reproduce su trayectoria real de nuScenes (no anticipa nada).
+    - Se elige UN adversario por escena: un agente en movimiento, a menos de
+      `radio_busqueda` m y dentro de +-`sector_grados` del frente del ego (no por detras:
+      ese golpe no se veria en la camara frontal). Se sortea entre los `n_candidatos`
+      mas cercanos (semilla fija por escena) para dar variedad.
+    - Agentes controlados: el adversario primero y despues los mas cercanos al ego
+      (sin el ego). CCDiff los tomaba de un archivo fijo que solo cubre 100 escenas.
+    - Guiado nuevo "intercepta_ego" (largo alcance): solo para el adversario, minimiza la
+      distancia minima entre su plan y el del ego en el horizonte. La perdida de colision
+      original solo actua a <~0,2 m de contacto, asi que por si sola no lleva a nadie al ego.
+    - La perdida de colision original se limita a los pares con el ego (excluded_agents).
+    En el log queda "[evaluacion] ego: <i> adversario: <j>" para analizar_choques.py.
     """
     import joblib
     import numpy as np
+    import torch
     from tbsim.envs import env_trajdata as et
     from tbsim.utils import scene_edit_utils as seu
+    from tbsim.utils import guidance_loss as gl
 
-    estado = {"env": None}
+    estado = {"env": None, "ego": None, "adversario": None}
     reset_original = et.EnvUnifiedSimulation.reset
 
     def reset(self, *a, **k):
@@ -158,30 +166,46 @@ def parchear_objetivo_ego():
         def __len__(self):
             return 10 ** 6
 
-    class CercanosAlEgo(dict):
+    class AdversarioYCercanos(dict):
         def __getitem__(self, clave):
             env = estado["env"]
             nombres = list(env.current_agent_names)
+            estado["ego"] = estado["adversario"] = None
             if "ego" not in nombres:
                 print("[evaluacion] AVISO: escena sin agente 'ego'; se controlan los primeros")
                 return list(range(len(nombres)))
             ie = nombres.index("ego")
-            c = np.asarray(env.get_observation()["agents"]["centroid"], dtype=float)
+            obs = env.get_observation()["agents"]
+            c = np.asarray(obs["centroid"], dtype=float)
+            yaw = np.asarray(obs["yaw"], dtype=float).reshape(-1)
+            vel = np.abs(np.asarray(obs.get("curr_speed", np.ones(len(c))), dtype=float).reshape(-1))
             d = np.linalg.norm(c - c[ie], axis=-1)
+            rumbo = np.degrees(np.arctan2(c[:, 1] - c[ie, 1], c[:, 0] - c[ie, 0]) - yaw[ie])
+            rumbo = (rumbo + 180) % 360 - 180
             orden = [int(i) for i in np.argsort(d) if i != ie and np.isfinite(d[i])]
-            print(f"[evaluacion] ego: {ie}")
+            validos = [i for i in orden if d[i] <= radio_busqueda and abs(rumbo[i]) <= sector_grados
+                       and vel[i] > 1.0]
+            adv = None
+            if validos:
+                rng = np.random.default_rng(semilla * 100003 + int(clave))
+                adv = int(rng.choice(validos[:n_candidatos]))
+                orden = [adv] + [i for i in orden if i != adv]
+            estado["ego"], estado["adversario"] = ie, adv
+            print(f"[evaluacion] ego: {ie} adversario: {adv if adv is not None else '-'}")
             return orden
+
     load_original = joblib.load
 
     def load(f, *a, **k):
         nombre = str(f)
         if nombre.endswith("10_control_idx_test_init.pkl"):
-            return CercanosAlEgo()
+            return AdversarioYCercanos()
         if nombre.endswith("0_scene_idx.pkl"):
             return Identidad()
         return load_original(f, *a, **k)
     joblib.load = load
 
+    # --- perdida de colision original: solo pares con el ego ---------------------
     colision_original = seu.HEURISTIC_FUNC["agent_collision"]
 
     def colision_con_ego(sim_scene, dt, num_disks, buffer_dist, decay_rate, excluded_agents, **kw):
@@ -191,6 +215,44 @@ def parchear_objetivo_ego():
             cfg["params"]["excluded_agents"] = [i for i, n in enumerate(nombres) if n != "ego"]
         return cfg
     seu.HEURISTIC_FUNC["agent_collision"] = colision_con_ego
+
+    # --- guiado nuevo: el adversario intercepta al ego ----------------------------
+    class InterceptaEgoLoss(gl.GuidanceLoss):
+        """Distancia minima entre el plan del adversario y el del ego (en el horizonte).
+
+        Minimo exacto (el gradiente va al instante de maxima aproximacion); el minimo
+        "suave" con logsumexp lo sesgaba varios metros a la baja y anulaba la perdida.
+        Por debajo de `radio` (centros a ~1 m: ya hay contacto) no empuja mas: el ultimo
+        tramo lo hace la perdida de colision original.
+        """
+        def __init__(self, ego, adversario, radio=1.0):
+            super().__init__()
+            self.ego, self.adversario = int(ego), int(adversario)
+            self.radio = radio
+
+        def forward(self, x, data_batch, agt_mask=None):
+            pos_w, _ = gl.transform_agents_to_world(x[..., :2], x[..., 3:4], data_batch["world_from_agent"])
+            B = pos_w.size(0)
+            ego_traj = pos_w[self.ego].detach()                              # (N, T, 2)
+            dist = torch.norm(pos_w - ego_traj.unsqueeze(0), dim=-1)          # (B, N, T)
+            dmin = dist.min(dim=-1).values
+            perdida = torch.relu(dmin - self.radio)                           # (B, N)
+            solo_adv = torch.zeros(B, 1, device=perdida.device, dtype=perdida.dtype)
+            if 0 <= self.adversario < B:
+                solo_adv[self.adversario] = 1.0
+            perdida = perdida * solo_adv
+            return perdida[agt_mask] if agt_mask is not None else perdida
+    gl.GUIDANCE_FUNC_MAP["intercepta_ego"] = InterceptaEgoLoss
+
+    def heuristica_intercepta(sim_scene, dt, **kw):
+        nombres = [a.name for a in sim_scene.agents]
+        if "ego" not in nombres or estado["adversario"] is None:
+            return None
+        return {"name": "intercepta_ego",
+                "params": {"ego": nombres.index("ego"), "adversario": estado["adversario"]},
+                "agents": None}
+    seu.HEURISTIC_FUNC["intercepta_ego"] = heuristica_intercepta
+    return estado
 
 
 def main():
@@ -225,6 +287,10 @@ def main():
     ap.add_argument("--objetivo_ego", action="store_true",
                     help="accidentes con el ego: se controlan los agentes mas cercanos (sin el ego) y el "
                          "guiado de colision apunta solo al ego; sin limite de 100 escenas")
+    ap.add_argument("--w_ego", type=float, default=1.0,
+                    help="peso del guiado 'intercepta_ego' (solo con --objetivo_ego)")
+    ap.add_argument("--semilla", type=int, default=0,
+                    help="semilla del sorteo del adversario (otra semilla = otro adversario en la escena)")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
@@ -250,7 +316,9 @@ def main():
     if args.sin_parche_guiado:
         nombre += "_sinparche"
     if args.objetivo_ego:
-        nombre += "_ego"
+        nombre += "_ego" + (f"{txt(args.w_ego)}" if args.w_ego != 1.0 else "")
+        if args.semilla:
+            nombre += f"_s{args.semilla}"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
     salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
@@ -299,6 +367,11 @@ def main():
             self.guidance_optimization_params["lr"] = args.guia_lr
         if args.guia_pasos is not None:
             self.guidance_optimization_params["grad_steps"] = args.guia_pasos
+        if args.objetivo_ego and not any(h.get("name") == "intercepta_ego" for h in self.edits.heuristic_config):
+            # va en tercer lugar: scene_editor fija el peso de los dos primeros con
+            # --w_collision y --w_offroad
+            self.edits.heuristic_config.append({"name": "intercepta_ego", "weight": args.w_ego,
+                                                "params": {}, "agents": None})
         self.lock(bloqueada)
         print(f"[evaluacion] rutas sustituidas en: {', '.join(cambios)}")
         print(f"[evaluacion] optimizador de guiado: {dict(self.guidance_optimization_params)}")
@@ -317,7 +390,7 @@ def main():
 
     le.parchear_deepcopy_feature_extractor()
     if args.objetivo_ego:
-        parchear_objetivo_ego()
+        parchear_objetivo_ego(semilla=args.semilla)
         print("[evaluacion] objetivo: accidentes con el ego (ego sin controlar, guiado solo hacia el ego)")
     if not args.sin_parche_guiado:
         parchear_guiado_parcial()

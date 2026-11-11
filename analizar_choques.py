@@ -61,7 +61,8 @@ def leer_controlados(log_path):
         elif linea.startswith("no valid scenes in this batch") and actual is not None:
             indice[actual] += 1
         elif linea.startswith("[evaluacion] ego:") and actual is not None:
-            ego_pendiente = int(linea.split(":")[1])
+            m = re.search(r"ego:\s*(\d+)", linea)
+            ego_pendiente = int(m.group(1)) if m else None
         elif linea.startswith("set guidance dim:"):
             m = patron_lista.search(linea)
             pendiente = [int(x) for x in m.group(1).split(",") if x.strip()] if m else None
