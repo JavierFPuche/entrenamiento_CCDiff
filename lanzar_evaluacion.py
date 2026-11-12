@@ -37,6 +37,8 @@ REGISTRO = "trajdata_nusc_ccdiff"
 CONTADOR_GUIADO = {"llamadas": 0, "con_cambio": 0, "grad_no_finito": 0}
 # Pruebas de que los guiados nuevos se ejecutan (job 5511/5512: w_ego 1 y 3 daban
 # metricas identicas y no habia forma de saber si intercepta_ego llegaba a calcularse)
+# Estado de --objetivo_ego (lo rellena parchear_objetivo_ego; se lee al final del log)
+ESTADO_EGO_REF = {}
 CONTADOR_EGO = {"intercepta": 0, "evita": 0, "dmin_suma": 0.0, "dmin_n": 0, "nan_ego": 0, "nan_adv": 0}
 
 
@@ -157,7 +159,8 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
     from tbsim.utils import scene_edit_utils as seu
     from tbsim.utils import guidance_loss as gl
 
-    estado = {"env": None, "ego": None, "adversario": None}
+    estado = ESTADO_EGO_REF
+    estado.update({"env": None, "ego": None, "adversario": None, "adv_nombre": None, "avisos_indice": 0})
     T_ALCANCE, PUNTOS_MAX, ACERCA_MIN = 6.0, 20.0, 2.0
 
     def holgura_inicial(c, yaw, ext, ie):
@@ -213,11 +216,22 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
         def __getitem__(self, clave):
             env = estado["env"]
             nombres = list(env.current_agent_names)
-            estado["ego"] = estado["adversario"] = None
+            estado["ego"] = estado["adversario"] = estado["adv_nombre"] = None
             if "ego" not in nombres:
                 print("[evaluacion] AVISO: escena sin agente 'ego'; se controlan los primeros")
                 return list(range(len(nombres)))
             ie = nombres.index("ego")
+            # v32: comprobar que el orden del env coincide con el de la escena simulada
+            # (sim_scene.agents), que es el que usan las perdidas de guiado
+            try:
+                esc = env._current_scenes[0]
+                nombres_sim = [a.name for a in esc.agents]
+                if nombres_sim != nombres:
+                    print(f"[evaluacion] AVISO orden: env y sim_scene difieren "
+                          f"(env[:6]={nombres[:6]}, sim_scene[:6]={nombres_sim[:6]}, "
+                          f"{len(nombres)} vs {len(nombres_sim)} agentes)")
+            except Exception as ex:  # noqa: BLE001
+                print(f"[evaluacion] (no se pudo comparar el orden env/sim_scene: {ex})")
             obs = env.get_observation()["agents"]
             c = np.asarray(obs["centroid"], dtype=float)
             yaw = np.asarray(obs["yaw"], dtype=float).reshape(-1)
@@ -262,6 +276,7 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                 adv = int(rng.choice(validos[:n_candidatos]))
                 orden = [adv] + [i for i in orden if i != adv]
             estado["ego"], estado["adversario"] = ie, adv
+            estado["adv_nombre"] = nombres[adv] if adv is not None else None
             extra = (f" (d={d[adv]:.0f} m, dmin_cv={dmin_cv[adv]:.1f} m en t={tmin_cv[adv]:.1f} s, "
                      f"{len(validos)} aptos)" if adv is not None else f" (descartes: {razones})")
             print(f"[evaluacion] ego: {ie} adversario: {adv if adv is not None else '-'}{extra}")
@@ -402,8 +417,25 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
         nombres = [a.name for a in sim_scene.agents]
         if "ego" not in nombres or estado["adversario"] is None:
             return None
+        # v32: el adversario se elige con su indice en env.current_agent_names, pero la
+        # perdida se aplica con indices de sim_scene.agents (los mismos que usa la perdida
+        # de colision original). Job 5519: en ~29 % de las llamadas la fila del adversario
+        # era NaN entera = el indice apuntaba a otro agente. Se busca por NOMBRE.
+        nom = estado["adv_nombre"]
+        if nom in nombres:
+            ia = nombres.index(nom)
+        else:
+            print(f"[evaluacion] AVISO indice: el adversario '{nom}' no esta en sim_scene.agents; "
+                  f"se usa el indice {estado['adversario']}")
+            ia = estado["adversario"]
+        if ia != estado["adversario"] or nombres.index("ego") != estado["ego"]:
+            estado["avisos_indice"] += 1
+            print(f"[evaluacion] AVISO indice: adversario '{nom}' es el {estado['adversario']} en el env "
+                  f"y el {ia} en sim_scene; ego {estado['ego']} -> {nombres.index('ego')}")
+            env_n = list(estado["env"].current_agent_names) if estado["env"] is not None else []
+            print(f"[evaluacion]   env[:6]={env_n[:6]}  sim_scene[:6]={nombres[:6]}")
         return {"name": "intercepta_ego",
-                "params": {"ego": nombres.index("ego"), "adversario": estado["adversario"]},
+                "params": {"ego": nombres.index("ego"), "adversario": ia},
                 "agents": None}
     seu.HEURISTIC_FUNC["intercepta_ego"] = heuristica_intercepta
 
@@ -591,6 +623,8 @@ def main():
                   f"(dmin medio adversario-ego en el plan: {media:.1f} m, en {e['dmin_n']} llamadas con "
                   f"datos validos), evita_otros {e['evita']} veces")
             print(f"[evaluacion] llamadas con NaN en el plan: del ego {e['nan_ego']}, del adversario {e['nan_adv']}")
+            print(f"[evaluacion] escenas con indice del adversario distinto entre env y sim_scene: "
+                  f"{ESTADO_EGO_REF.get('avisos_indice', 'desconocido')}")
             if e["intercepta"] == 0:
                 print("[evaluacion] AVISO: intercepta_ego NUNCA se ha calculado: el guiado hacia el ego no actua")
 
