@@ -235,6 +235,24 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
             obs = env.get_observation()["agents"]
             c = np.asarray(obs["centroid"], dtype=float)
             yaw = np.asarray(obs["yaw"], dtype=float).reshape(-1)
+            # v33: en la escena 0101 (prueba_ego5) el adversario empezaba DETRAS del ego y
+            # paso el filtro de sector: obs["yaw"] no parece el rumbo en el mundo. Si hay
+            # world_from_agent, el rumbo y la posicion se toman de esa matriz.
+            M = obs.get("world_from_agent")
+            if M is not None:
+                M = np.asarray(M, dtype=float)
+                if M.ndim == 3 and M.shape[0] == len(c):
+                    yaw_m = np.arctan2(M[:, 1, 0], M[:, 0, 0])
+                    c_m = M[:, :2, 2]
+                    dif_yaw = np.abs((yaw_m - yaw + np.pi) % (2 * np.pi) - np.pi)
+                    dif_c = np.linalg.norm(c_m - c[:, :2], axis=-1)
+                    print(f"[evaluacion] rumbo: obs['yaw'] vs world_from_agent: dif max {np.degrees(np.nanmax(dif_yaw)):.0f} grados "
+                          f"(ego {np.degrees(dif_yaw[ie]):.0f}); centroides: dif max {np.nanmax(dif_c):.2f} m; "
+                          f"yaw ego obs={np.degrees(yaw[ie]):.0f} matriz={np.degrees(yaw_m[ie]):.0f}")
+                    yaw = yaw_m
+            else:
+                print(f"[evaluacion] AVISO rumbo: obs sin world_from_agent; se usa obs['yaw'] "
+                      f"(claves: {sorted(obs.keys())[:25]})")
             vel = np.abs(np.asarray(obs.get("curr_speed", np.ones(len(c))), dtype=float).reshape(-1))
             ext = np.asarray(obs.get("extent", np.tile([4.5, 1.9, 1.5], (len(c), 1))), dtype=float)
             d = np.linalg.norm(c - c[ie], axis=-1)
