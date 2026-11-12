@@ -132,6 +132,30 @@ def parchear_guiado_parcial():
     gl.PartialPerturbationGuidance.perturb = perturb
 
 
+def parchear_inicios(inicios):
+    """Varios instantes de inicio por escena (--inicios 31,61,91).
+
+    scene_editor.py llama a env.reset(scene_indices=[s]) sin start_frame_index, asi que el
+    entorno usa siempre el mismo (31). La lista de escenas se repite una vez por inicio y
+    aqui se inyecta el fotograma: la k-esima vez que se resetea la escena s se usa
+    inicios[k % len(inicios)]. Asi cada escena de nuScenes da varias oportunidades de
+    encontrar un adversario (en prueba_ego6 solo 3 de 10 escenas lo tenian en el frame 31).
+    """
+    from tbsim.envs import env_trajdata as et
+    reset_previo = et.EnvUnifiedSimulation.reset
+    veces = {}
+
+    def reset(self, scene_indices=None, start_frame_index=None, *a, **k):
+        if start_frame_index is None and scene_indices:
+            clave = tuple(int(x) for x in scene_indices)
+            n = veces.get(clave, 0)
+            veces[clave] = n + 1
+            start_frame_index = inicios[n % len(inicios)]
+            print(f"[evaluacion] inicio: escena(s) {list(clave)} desde el fotograma {start_frame_index}")
+        return reset_previo(self, scene_indices, start_frame_index, *a, **k)
+    et.EnvUnifiedSimulation.reset = reset
+
+
 def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n_candidatos=3):
     """Accidentes CON EL EGO sin que el ego "sepa" nada (--objetivo_ego).
 
@@ -295,6 +319,8 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                 orden = [adv] + [i for i in orden if i != adv]
             estado["ego"], estado["adversario"] = ie, adv
             estado["adv_nombre"] = nombres[adv] if adv is not None else None
+            if adv is not None:
+                estado["adv_d"] = float(d[adv])
             extra = (f" (d={d[adv]:.0f} m, dmin_cv={dmin_cv[adv]:.1f} m en t={tmin_cv[adv]:.1f} s, "
                      f"{len(validos)} aptos)" if adv is not None else f" (descartes: {razones})")
             print(f"[evaluacion] ego: {ie} adversario: {adv if adv is not None else '-'}{extra}")
@@ -354,6 +380,10 @@ def parchear_objetivo_ego(semilla=0, sector_grados=100.0, radio_busqueda=60.0, n
                 fin_a = torch.isfinite(adv_traj.detach()).all(-1)
                 CONTADOR_EGO["nan_ego"] += int((~fin_e).any())
                 CONTADOR_EGO["nan_adv"] += int((~fin_a).any())
+                clave = (ESTADO_EGO_REF.get("adv_nombre"), round(ESTADO_EGO_REF.get("adv_d", -1)))
+                por = CONTADOR_EGO.setdefault("por_adv", {}).setdefault(clave, [0, 0])
+                por[0] += 1
+                por[1] += int((~fin_a).all())
                 ok = fin_e & fin_a
                 dif = torch.where(ok.unsqueeze(-1), adv_traj - torch.nan_to_num(ego_traj),
                                   torch.zeros_like(adv_traj))
@@ -504,6 +534,9 @@ def main():
                     help="peso del guiado 'evita_otros': el adversario esquiva a todos menos al ego (0 = sin el)")
     ap.add_argument("--semilla", type=int, default=0,
                     help="semilla del sorteo del adversario (otra semilla = otro adversario en la escena)")
+    ap.add_argument("--inicios", default=None,
+                    help="fotogramas de inicio separados por comas, p. ej. 31,61,91: cada escena se simula "
+                         "una vez por inicio (por defecto solo el de tbsim, 31)")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
@@ -534,6 +567,9 @@ def main():
             nombre += f"_ev{txt(args.w_evita)}"
         if args.semilla:
             nombre += f"_s{args.semilla}"
+    inicios = [int(x) for x in args.inicios.split(",") if x.strip()] if args.inicios else None
+    if inicios:
+        nombre += "_ini" + "-".join(str(i) for i in inicios)
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
     salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
@@ -564,6 +600,9 @@ def main():
         print(f"[evaluacion] AVISO: CCDiff solo tiene agentes controlables para {n_max} escenas; "
               f"se quitan los indices {fuera[0]}..{fuera[-1]}")
         escenas = [i for i in escenas if i < n_max]
+    if inicios:
+        escenas = [e for e in escenas for _ in inicios]
+        print(f"[evaluacion] {len(inicios)} inicios por escena {inicios}: {len(escenas)} simulaciones")
 
     def init(self, *a, **k):
         init_original(self, *a, **k)
@@ -607,6 +646,8 @@ def main():
         sys.exit(f"No hay ningun checkpoint que contenga '{args.ckpt}' en {args.ckpt_dir}")
 
     le.parchear_deepcopy_feature_extractor()
+    if inicios:
+        parchear_inicios(inicios)
     if args.objetivo_ego:
         parchear_objetivo_ego(semilla=args.semilla)
         print("[evaluacion] objetivo: accidentes con el ego (ego sin controlar, guiado solo hacia el ego)")
@@ -641,6 +682,9 @@ def main():
                   f"(dmin medio adversario-ego en el plan: {media:.1f} m, en {e['dmin_n']} llamadas con "
                   f"datos validos), evita_otros {e['evita']} veces")
             print(f"[evaluacion] llamadas con NaN en el plan: del ego {e['nan_ego']}, del adversario {e['nan_adv']}")
+            for (nom, dist), (n, n_nan) in sorted(e.get("por_adv", {}).items(), key=lambda kv: -kv[1][1]):
+                print(f"[evaluacion]   adversario {nom} (a {dist} m del ego al inicio): {n} llamadas, "
+                      f"{n_nan} con su plan entero en NaN")
             print(f"[evaluacion] escenas con indice del adversario distinto entre env y sim_scene: "
                   f"{ESTADO_EGO_REF.get('avisos_indice', 'desconocido')}")
             if e["intercepta"] == 0:
