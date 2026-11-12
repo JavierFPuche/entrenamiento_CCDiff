@@ -133,13 +133,14 @@ def parchear_guiado_parcial():
 
 
 def parchear_inicios(inicios):
-    """Varios instantes de inicio por escena (--inicios 31,61,91).
+    """Fotograma de inicio de las escenas (--inicio 61).
 
     scene_editor.py llama a env.reset(scene_indices=[s]) sin start_frame_index, asi que el
-    entorno usa siempre el mismo (31). La lista de escenas se repite una vez por inicio y
-    aqui se inyecta el fotograma: la k-esima vez que se resetea la escena s se usa
-    inicios[k % len(inicios)]. Asi cada escena de nuScenes da varias oportunidades de
-    encontrar un adversario (en prueba_ego6 solo 3 de 10 escenas lo tenian en el frame 31).
+    entorno usa siempre el mismo (31); aqui se inyecta otro. Con varios inicios (una
+    ejecucion por inicio, INICIOS en evaluar.sh) cada escena de nuScenes da varias
+    oportunidades de encontrar un adversario (prueba_ego6: solo 3 de 10 escenas lo tenian
+    en el frame 31). No se puede repetir la escena en la misma ejecucion: data.hdf5 la
+    guarda por nombre ("name already exists", prueba_ego7).
     """
     from tbsim.envs import env_trajdata as et
     reset_previo = et.EnvUnifiedSimulation.reset
@@ -534,9 +535,10 @@ def main():
                     help="peso del guiado 'evita_otros': el adversario esquiva a todos menos al ego (0 = sin el)")
     ap.add_argument("--semilla", type=int, default=0,
                     help="semilla del sorteo del adversario (otra semilla = otro adversario en la escena)")
-    ap.add_argument("--inicios", default=None,
-                    help="fotogramas de inicio separados por comas, p. ej. 31,61,91: cada escena se simula "
-                         "una vez por inicio (por defecto solo el de tbsim, 31)")
+    ap.add_argument("--inicio", type=int, default=None,
+                    help="fotograma de inicio de todas las escenas (por defecto el de tbsim, 31). Para varios "
+                         "inicios, una ejecucion por inicio: INICIOS=\"31 61 91\" en evaluar.sh (tbsim guarda "
+                         "cada escena en data.hdf5 por nombre y no admite repetirla en la misma ejecucion)")
     ap.add_argument("--sin_parche_guiado", action="store_true",
                     help="usar el perturb ORIGINAL de CCDiff (con --part_control el guiado no hace nada)")
     args = ap.parse_args()
@@ -567,9 +569,9 @@ def main():
             nombre += f"_ev{txt(args.w_evita)}"
         if args.semilla:
             nombre += f"_s{args.semilla}"
-    inicios = [int(x) for x in args.inicios.split(",") if x.strip()] if args.inicios else None
+    inicios = [args.inicio] if args.inicio is not None else None
     if inicios:
-        nombre += "_ini" + "-".join(str(i) for i in inicios)
+        nombre += f"_ini{args.inicio}"
     grupo = args.grupo or Path(args.ckpt_dir).parent.name
     salida = Path(args.salida or f"/workspace/evaluaciones/{grupo}/{nombre}")
 
@@ -600,9 +602,6 @@ def main():
         print(f"[evaluacion] AVISO: CCDiff solo tiene agentes controlables para {n_max} escenas; "
               f"se quitan los indices {fuera[0]}..{fuera[-1]}")
         escenas = [i for i in escenas if i < n_max]
-    if inicios:
-        escenas = [e for e in escenas for _ in inicios]
-        print(f"[evaluacion] {len(inicios)} inicios por escena {inicios}: {len(escenas)} simulaciones")
 
     def init(self, *a, **k):
         init_original(self, *a, **k)

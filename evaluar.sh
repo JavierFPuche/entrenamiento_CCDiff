@@ -36,6 +36,7 @@ WOFFS=${WOFFS:-"1"}
 GRUPO=${GRUPO:-$(dirname "${ENTRENAMIENTO}")}
 CONTROL=${CONTROL:-0}
 LRS=${LRS:-""}        # p. ej. LRS="0.3 1 3": lr del guiado (vacio = el de CCDiff, 0.3)
+INICIOS=${INICIOS:-""} # p. ej. INICIOS="31 61 91": una ejecucion por fotograma de inicio (vacio = 31)
 EXTRA=${EXTRA:-""}    # argumentos extra para lanzar_evaluacion.py, p. ej. EXTRA="--sin_video --controlables 8"
 
 echo "Running on $(hostname)"
@@ -75,9 +76,12 @@ for CKPT in ${CKPTS}; do
   for W in ${WCOLS}; do
   for WO in ${WOFFS}; do
   for LR in ${LRS:-por_defecto}; do
+  for INI in ${INICIOS:-por_defecto}; do
     ARG_LR=""
     [ "${LR}" != "por_defecto" ] && ARG_LR="--guia_lr ${LR}"
-    echo "================ ${CKPT}  w_collision=${W}  w_offroad=${WO}  lr=${LR} ================"
+    ARG_INI=""
+    [ "${INI}" != "por_defecto" ] && ARG_INI="--inicio ${INI}"
+    echo "================ ${CKPT}  w_collision=${W}  w_offroad=${WO}  lr=${LR}  inicio=${INI} ================"
     srun \
       --container-image="$OUTPUT_SQSH" \
       --container-mounts="$MOUNTS" \
@@ -85,8 +89,9 @@ for CKPT in ${CKPTS}; do
       python /workspace/scripts/lanzar_evaluacion.py \
         --ckpt_dir "/workspace/entrenados/${ENTRENAMIENTO}" --ckpt "${CKPT}" \
         --w_collision "${W}" --w_offroad "${WO}" --escenas "${ESCENAS}" --grupo "${GRUPO}" \
-        ${ARG_LR} ${EXTRA} \
-      || echo "AVISO: fallo la evaluacion de ${CKPT} con w_collision=${W} w_offroad=${WO} lr=${LR}"
+        ${ARG_LR} ${ARG_INI} ${EXTRA} \
+      || echo "AVISO: fallo la evaluacion de ${CKPT} con w_collision=${W} w_offroad=${WO} lr=${LR} inicio=${INI}"
+  done
   done
   done
   done
