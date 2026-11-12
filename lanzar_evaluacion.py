@@ -79,7 +79,17 @@ def parchear_guiado_parcial():
 
         mascara = None
         if self.available_idx is not None and hoja.dim() in (3, 4):
-            idx = list(self.available_idx[: x_guidance.shape[-3]])
+            n_ag = hoja.shape[0] if hoja.dim() == 3 else hoja.shape[1]
+            # v36: el recorte [:n] limitaba la LONGITUD de la lista, no los valores. Con
+            # inicio 61/91 un indice controlado podia ser >= numero de agentes del batch y
+            # la GPU fallaba ("device-side assert", prueba_ego7). Se descartan esos indices.
+            idx_todos = [int(i) for i in self.available_idx]
+            idx = [i for i in idx_todos[: x_guidance.shape[-3]] if 0 <= i < n_ag]
+            if len(idx) < len(idx_todos[: x_guidance.shape[-3]]):
+                CONTADOR_GUIADO["idx_fuera"] = CONTADOR_GUIADO.get("idx_fuera", 0) + 1
+                if CONTADOR_GUIADO["idx_fuera"] == 1:
+                    print(f"[evaluacion] AVISO: indices controlados fuera del batch ({idx_todos} con "
+                          f"{n_ag} agentes); se ignoran")
             ts = getattr(self, "controllable_ts", None)
             mascara = torch.zeros_like(hoja, dtype=torch.bool)
             if hoja.dim() == 3:
@@ -144,7 +154,23 @@ def parchear_inicios(inicios):
     """
     from tbsim.envs import env_trajdata as et
     reset_previo = et.EnvUnifiedSimulation.reset
+    init_previo = et.EnvUnifiedSimulation.__init__
     veces = {}
+
+    # v36: con solo inyectar start_frame_index en reset(), las heuristicas de guiado se
+    # calculaban sobre una escena construida desde el fotograma por defecto (31): con
+    # inicio 61/91 el adversario "no estaba en sim_scene.agents" o tenia otro indice
+    # (prueba_ego7). Se fija tambien en la configuracion del entorno, que es lo que lee
+    # todo lo demas.
+    def init(self, *a, **k):
+        init_previo(self, *a, **k)
+        try:
+            anterior = self._env_config.simulation.start_frame_index
+            self._env_config.simulation.start_frame_index = inicios[0]
+            print(f"[evaluacion] inicio: env_config.simulation.start_frame_index {anterior} -> {inicios[0]}")
+        except Exception as ex:  # noqa: BLE001
+            print(f"[evaluacion] AVISO inicio: no se pudo fijar en env_config ({ex})")
+    et.EnvUnifiedSimulation.__init__ = init
 
     def reset(self, scene_indices=None, start_frame_index=None, *a, **k):
         if start_frame_index is None and scene_indices:
@@ -153,6 +179,8 @@ def parchear_inicios(inicios):
             veces[clave] = n + 1
             start_frame_index = inicios[n % len(inicios)]
             print(f"[evaluacion] inicio: escena(s) {list(clave)} desde el fotograma {start_frame_index}")
+        elif start_frame_index is not None:
+            print(f"[evaluacion] inicio: reset recibe start_frame_index={start_frame_index} (se respeta)")
         return reset_previo(self, scene_indices, start_frame_index, *a, **k)
     et.EnvUnifiedSimulation.reset = reset
 
@@ -673,7 +701,8 @@ def main():
         if not args.sin_parche_guiado:
             c = CONTADOR_GUIADO
             print(f"[evaluacion] pasos de guiado: {c['llamadas']}, con cambio en la trayectoria: {c['con_cambio']}, "
-                  f"elementos de gradiente NaN/inf anulados: {c['grad_no_finito']}")
+                  f"elementos de gradiente NaN/inf anulados: {c['grad_no_finito']}, "
+                  f"pasos con indices controlados fuera del batch: {c.get('idx_fuera', 0)}")
         if args.objetivo_ego:
             e = CONTADOR_EGO
             media = e["dmin_suma"] / e["dmin_n"] if e["dmin_n"] else float("nan")
