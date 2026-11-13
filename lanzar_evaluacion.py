@@ -172,15 +172,23 @@ def parchear_inicios(inicios):
             print(f"[evaluacion] AVISO inicio: no se pudo fijar en env_config ({ex})")
     et.EnvUnifiedSimulation.__init__ = init
 
+    # v37: scene_editor.py calcula sus propios sim_start_frames (31) y se los pasa
+    # EXPLICITAMENTE a compute_heuristic_guidance y a guided_rollout; solo algun reset llega
+    # con None. Antes solo se cambiaba ese, asi que el adversario se elegia en el frame 61
+    # y las heuristicas y la simulacion iban en el 31 (indices cruzados, device-side assert).
+    # Ahora TODOS los reset usan el inicio pedido.
     def reset(self, scene_indices=None, start_frame_index=None, *a, **k):
-        if start_frame_index is None and scene_indices:
-            clave = tuple(int(x) for x in scene_indices)
-            n = veces.get(clave, 0)
-            veces[clave] = n + 1
-            start_frame_index = inicios[n % len(inicios)]
-            print(f"[evaluacion] inicio: escena(s) {list(clave)} desde el fotograma {start_frame_index}")
-        elif start_frame_index is not None:
-            print(f"[evaluacion] inicio: reset recibe start_frame_index={start_frame_index} (se respeta)")
+        recibido = start_frame_index
+        if scene_indices is not None:
+            n = len(scene_indices)
+            start_frame_index = inicios[0] if n == 1 else [inicios[0]] * n
+        else:
+            start_frame_index = inicios[0]
+        clave = (tuple(int(x) for x in scene_indices) if scene_indices is not None else None, str(recibido))
+        if clave not in veces:
+            veces[clave] = 1
+            print(f"[evaluacion] inicio: reset de escena(s) "
+                  f"{list(clave[0]) if clave[0] else '-'} con fotograma {inicios[0]} (recibido: {recibido})")
         return reset_previo(self, scene_indices, start_frame_index, *a, **k)
     et.EnvUnifiedSimulation.reset = reset
 
